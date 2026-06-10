@@ -58,9 +58,24 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · → owner
         persisting the flag is a known M5/M7 follow-up (see `src/chunker/CLAUDE.md`).
       - All four gates green (Rust 1.85.0); 74 existing/new + 2 chunker unit tests pass.
 
-## Phase 5 — indexer (M5) · plan: [plans/M5-indexer.md](plans/M5-indexer.md)
-- [ ] RED tests: discovery/.gitignore; full index; incremental idempotency; delete → test-lead
-- [ ] `indexer` pipeline (discovery → parse → chunk → hash → store; incremental) → engineering-lead
+## Phase 5 — indexer (M5) · plan: [plans/M5-indexer.md](plans/M5-indexer.md) · brief: [.claude/briefs/BRIEF-M5-indexer.md](../.claude/briefs/BRIEF-M5-indexer.md)
+- Sliced M5.1–M5.4 (one commit per slice recommended); execution sequence + gate commands in the brief.
+- [ ] **M5.1 discovery + language detection** — RED (5 tests: gitignore, config ignore_patterns,
+      language filter, ext→language, non-source skipped) → test-lead; `discovery.rs` via
+      `ignore::WalkBuilder` → engineering-lead.
+- [ ] **M5.2 full index (`index_all`)** — RED (chunk count, files_metadata per file, index_state
+      totals, IndexStats, D2 malformed-file-does-not-abort) → test-lead; §5.1 pipeline → engineering-lead;
+      cold-index bench skeleton → perf. (Carries the M4 cross-ref re-walk fix below.)
+- [ ] **M5.3 incremental + idempotency + delete** — RED (no-writes re-index, modify-one, exact-N,
+      new-file, deleted-file-cleared) → test-lead; §5.2 change detection + deletion reconciliation → engineering-lead.
+- [ ] **M5.4 e2e init → index** — RED (`tests/e2e_index.rs` + `tests/fixtures/repo/**`) → test-lead;
+      thin `init`/`index` library glue → engineering-lead.
+- **Decision (`is_heuristic` persistence seam):** **deferred to M7, not persisted in M5.** No M5
+      scenario observes the flag after a storage round-trip and nothing branches on it; adding the
+      column/migration now would be un-driven production surface (TDD). The indexer passes the
+      chunker's `is_heuristic` through in-memory; only the stored representation drops it (unchanged
+      from M4). M7 formatter/CLI drives persistence via a RED test (storage adds an UNINDEXED column +
+      `index_state.version` migration). Recorded in BRIEF-M5-indexer.md §Follow-ups (b) and `src/chunker/CLAUDE.md`.
 - [ ] **Perf follow-up (from M4 review):** `chunker::call_names_in_span` re-walks the whole tree
       per chunk → O(chunks × tree_nodes) cross-reference enrichment, a deviation from the M4 plan's
       "single-pass, no per-chunk re-query" budget. Correctness unaffected (no M4 budget breached).
