@@ -51,9 +51,33 @@ via `error_rate`), so a syntactically broken file usually returns `Ok(0..)`; any
 error (unreadable, store failure) is still caught here. Only non-isolatable failures (discovery,
 the `index_state` totals write) propagate as `Err`.
 
-## Planned layout (M5.3+)
-- `pipeline.rs` — change detection (§5.2): `detect_changed_files` via `compute_file_hash` vs
-  `get_file_hash`; `update_files` for an explicit list; deletion reconciliation vs `files_metadata`.
+## Shipped API (M5.3 — incremental + idempotency + delete)
+- `pipeline.rs`:
+  - `detect_changed_files(storage, &[PathBuf]) -> Result<Vec<PathBuf>, IndexError>` — returns the
+    candidates whose `hasher::compute_file_hash` differs from the stored `get_file_hash` (new files
+    have no stored hash ⇒ changed). Unchanged files are skipped — this is the no-write predicate.
+    A file whose hash can't be computed is treated as changed (so the caller's D2 path handles it).
+  - `reindex_file(parser, storage, path) -> Result<usize, IndexError>` — `delete_chunks_for_file`
+    first (no stale/duplicate chunks), then the normal `index_file` path (re-parse → re-chunk →
+    `insert_chunks` → `update_file_hash`).
+- `mod.rs`:
+  - `Indexer::update_files(&mut self, files: &[PathBuf]) -> Result<IndexStats, IndexError>` —
+    `detect_changed_files` over the explicit list → `reindex_each` (delete-first, D2-isolated) →
+    `restamp_index_state`. `files_processed` = files actually re-indexed.
+  - `Indexer::index_all` is now **incremental + reconcile** on a populated DB: skip unchanged (no
+    writes), re-index changed/new, then reconcile deletions (every `all_indexed_files()` path not in
+    the discovered set ⇒ `delete_chunks_for_file` + `delete_file_meta`), then `restamp_index_state`.
+  - private `reindex_each` (accumulate stats over a delete-first re-index) + `restamp_index_state`
+    (recompute `total_files`/`total_chunks` from `files_metadata` so totals never drift).
+- **Idempotency / no-write guarantee:** an unchanged file fails the `detect_changed_files` hash
+  compare, so it is never in the `reindex_each` set — no `delete_chunks_for_file`, no `insert_chunks`,
+  no `update_file_hash` re-stamp. The stored hash, `FileMeta`, and chunk rowids are untouched. Note
+  the stored `content_hash` IS `compute_file_hash` (content+mtime, same 32-hex format), so a second
+  unchanged run compares equal. Locked at unit level by `pipeline::tests::
+  detect_changed_files_empty_for_unchanged_repo`.
+- **Storage additions (M5.3, plan §3.2.2 updated):** `Storage::delete_file_meta(&Path)` and
+  `Storage::all_indexed_files() -> Vec<PathBuf>` — internal CRUD symmetric with the existing
+  `delete_chunks_for_file`/`update_file_hash`, used by the reconcile + restamp paths.
 - Slices M5.1–M5.4 + execution sequence: [`.claude/briefs/BRIEF-M5-indexer.md`](../../.claude/briefs/BRIEF-M5-indexer.md).
 
 ## Decisions / seams
@@ -69,7 +93,8 @@ the `index_state` totals write) propagate as `Err`.
   order) unchanged; M4 chunker tests (10 + 3 proptest) stay green.
 
 ## Status
-**M5.2: GREEN (2026-06-10)** — full index (`index_all`) + per-file `pipeline.rs` shipped; D2
-isolation + chunker single-pass cross-ref refactor landed. 10/10 `indexer_tests` (5 M5.1 + 5
-M5.2), 86 tests total, all four gates clean (Rust 1.85). M5.3–M5.4 (incremental/delete + e2e)
-pending. Brief: [`.claude/briefs/BRIEF-M5-indexer.md`](../../.claude/briefs/BRIEF-M5-indexer.md).
+**M5.3: GREEN (2026-06-10)** — incremental `update_files` + idempotent/reconciling `index_all`
+(skip-unchanged no-writes, re-index changed/new, reconcile deletions, restamp totals) shipped.
+15/15 `indexer_tests` (5 M5.1 + 5 M5.2 + 5 M5.3) + 1 new `pipeline` unit test; **92 tests total**,
+all four gates clean (Rust 1.85). M5.4 (e2e init→index) pending. Brief:
+[`.claude/briefs/BRIEF-M5-indexer.md`](../../.claude/briefs/BRIEF-M5-indexer.md).

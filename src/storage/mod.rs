@@ -158,6 +158,27 @@ impl Storage {
         Ok(())
     }
 
+    /// Delete a file's `files_metadata` row (deletion reconciliation, §5.2). Symmetric with
+    /// [`Storage::delete_chunks_for_file`]; deleting an unknown file is a no-op (0 rows affected).
+    pub fn delete_file_meta(&self, file_path: &Path) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(queries::DELETE_FILE_META, params![path_to_str(file_path)])?;
+        Ok(())
+    }
+
+    /// Enumerate every file path currently recorded in `files_metadata`. Drives deletion
+    /// reconciliation: paths returned here but no longer on disk are stale and must be cleaned up.
+    pub fn all_indexed_files(&self) -> Result<Vec<std::path::PathBuf>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(queries::ALL_INDEXED_FILES)?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(std::path::PathBuf::from(row?));
+        }
+        Ok(out)
+    }
+
     /// Full-text BM25 search. Returns at most `limit` hits, best-first. An empty database (or no
     /// match) yields an empty `Vec`, not an error.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {

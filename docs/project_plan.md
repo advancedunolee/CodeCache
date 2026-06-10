@@ -332,7 +332,17 @@ impl Storage {
     
     // Delete all chunks for a given file (for incremental updates)
     pub fn delete_chunks_for_file(&self, file_path: &Path) -> Result<()>;
-    
+
+    // Delete a file's files_metadata row (deletion reconciliation, §5.2). Added in M5.3:
+    // symmetric with delete_chunks_for_file so the indexer can fully evict a file that has
+    // disappeared from disk (chunks + metadata row). Deleting an unknown file is a no-op.
+    pub fn delete_file_meta(&self, file_path: &Path) -> Result<()>;
+
+    // Enumerate every path in files_metadata (deletion reconciliation, §5.2). Added in M5.3:
+    // lets index_all compare the known/indexed set against the on-disk discovery set and evict
+    // files that are gone. Also used to recompute DB-wide index_state totals after a delta.
+    pub fn all_indexed_files(&self) -> Result<Vec<PathBuf>>;
+
     // Full-text search with BM25 ranking
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
     

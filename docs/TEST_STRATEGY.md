@@ -64,7 +64,11 @@ this document is the source for "what scenarios must a slice cover" referenced b
 - Malformed file in a full index does not abort the batch (**D2**): `index_all` returns `Ok`, the
   bad file is skipped/heuristically chunked, and sibling valid files are still indexed.
 - Incremental: re-index unchanged ⇒ no writes (idempotent); modify N files ⇒ exactly those re-indexed.
-- Deleted file ⇒ its chunks removed.
+- `update_files(&[..])` re-indexes exactly the changed files in the list (hash-filtered); a modified
+  file's new symbol becomes searchable while untouched files keep their hash/chunks.
+- Re-index (reconcile mode) discovers a newly-added file: its symbol is searchable + `files_metadata`
+  row written, without dropping pre-existing files.
+- Deleted file ⇒ its chunks removed AND its `files_metadata` row cleared; `index_state` totals decrease.
 
 ### retriever
 - BM25 ranking deterministic; relevant chunk ranks above irrelevant.

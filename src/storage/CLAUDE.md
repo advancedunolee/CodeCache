@@ -23,6 +23,10 @@ is cheaply `Clone`-able and the MCP server can lend one connection to `Retriever
   `search(&str, usize) -> Vec<SearchResult>` (BM25 best-first, deterministic `rowid` tie-break),
   `get_file_hash`/`get_file_meta`, `update_file_hash(&Path, &FileMeta)` (D6 upsert),
   `get_index_state`/`set_index_state`.
+- **M5.3 additions** (deletion reconciliation, plan §3.2.2 updated): `delete_file_meta(&Path)`
+  (drop a `files_metadata` row — symmetric with `delete_chunks_for_file`; unknown file = no-op),
+  `all_indexed_files() -> Vec<PathBuf>` (enumerate every indexed path — drives the indexer's
+  on-disk-vs-known reconcile and the DB-wide totals recompute).
 - `SearchResult { chunk, bm25_score }`. `StorageError::{Sqlite, LockPoisoned, CorruptRow}` (typed,
   impl `std::error::Error`; no reachable panic — poisoned lock & unknown stored enum are typed).
 

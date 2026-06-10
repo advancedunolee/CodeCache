@@ -76,8 +76,15 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · → owner
   - [ ] **Follow-up (M5.2 review, non-blocking):** cross-reference enrichment is under-tested — add a RED
         test for nested-function call attribution + duplicate-call dedup (first-seen) to lock the contract
         independently of the single-pass impl. → test-lead
-- [ ] **M5.3 incremental + idempotency + delete** — RED (no-writes re-index, modify-one, exact-N,
-      new-file, deleted-file-cleared) → test-lead; §5.2 change detection + deletion reconciliation → engineering-lead.
+- [x] **M5.3 incremental + idempotency + delete** — RED (no-writes re-index, modify-one, exact-N,
+      new-file, deleted-file-cleared) → test-lead; §5.2 implemented → engineering-lead:
+      `pipeline::detect_changed_files` (hash-compare skip = no-write predicate) + `reindex_file`
+      (delete-first); `Indexer::update_files` (explicit-list incremental, `files_processed` = files
+      re-indexed); `index_all` now incremental + reconcile (skip-unchanged no-writes, re-index
+      changed/new, reconcile deletions via `all_indexed_files` vs disk → `delete_chunks_for_file` +
+      `delete_file_meta`, restamp DB-wide totals). Storage gained `delete_file_meta` +
+      `all_indexed_files` (plan §3.2.2 updated). 15/15 indexer + 1 new `pipeline` unit test; **92
+      tests total**, all four gates clean (Rust 1.85). Reviewer pending. GREEN 2026-06-10.
 - [ ] **M5.4 e2e init → index** — RED (`tests/e2e_index.rs` + `tests/fixtures/repo/**`) → test-lead;
       thin `init`/`index` library glue → engineering-lead.
 - **Decision (`is_heuristic` persistence seam):** **deferred to M7, not persisted in M5.** No M5

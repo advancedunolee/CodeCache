@@ -21,7 +21,7 @@
 //! `.gitignore` is created in-test), keeping the repo clean and tests parallel-safe.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use codecache::config::Config;
 use codecache::indexer::{detect_language, discover_files, IndexStats, Indexer};
@@ -399,5 +399,368 @@ fn malformed_file_in_repo_does_not_abort_index() {
         hits.iter()
             .map(|h| &h.chunk.symbol_name)
             .collect::<Vec<_>>()
+    );
+}
+
+// ═════════════ Slice M5.3 — incremental + idempotency + delete ═════════════
+//
+// API under test (pinned for the engineering lead):
+// ```ignore
+// impl Indexer {
+//     // Re-index exactly the files in `files` whose content hash changed (skip unchanged within the
+//     // list per `compute_file_hash` vs `get_file_hash`). `files_processed` counts the files actually
+//     // re-indexed. Each test below changes EVERY file it passes, so `files_processed == files.len()`
+//     // regardless of whether the impl hash-filters or force-reindexes.
+//     pub fn update_files(&mut self, files: &[PathBuf]) -> Result<IndexStats, IndexError>;
+// }
+// ```
+// `index_all` on an already-populated DB runs in INCREMENTAL / RECONCILE mode (§5.2): skip files
+// whose hash is unchanged, re-index changed files, index newly-appeared files, and reconcile
+// deletions — files present in `files_metadata` but no longer on disk have their chunks deleted and
+// their metadata row cleared. Tests #1/#4/#5 depend on these `index_all` reconcile semantics.
+
+/// Searchable symbol names for `query`, sorted, deduped — a stable observable view of the chunk set
+/// for before/after comparison.
+fn searchable_symbols(storage: &Storage, query: &str) -> Vec<String> {
+    let mut names: Vec<String> = storage
+        .search(query, 100)
+        .expect("search must succeed")
+        .into_iter()
+        .map(|h| h.chunk.symbol_name)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+#[test]
+fn reindex_unchanged_repo_performs_no_writes() {
+    // Idempotency: index_all once, capture the observable state (each file's stored hash, the
+    // index_state totals, each file's FileMeta content_hash/mtime, and the searchable chunk set).
+    // Re-run index_all with NO file changes; every observable must be byte-identical. A re-index of
+    // an unchanged file would re-stamp its FileMeta (content_hash/mtime) and delete+re-insert its
+    // chunks (changing rowids/ordering) — so stable FileMeta + a stable chunk set is the integration
+    // -level proxy for "no writes were issued" (a SQLite write-spy is not reachable from here; this
+    // limitation is documented in the brief).
+    let repo = temp_repo();
+    let root = repo.path();
+    write_file(root, "alpha.py", "def alpha_fn():\n    return 1\n");
+    write_file(root, "beta.py", "def beta_fn():\n    return 2\n");
+    let alpha = root.join("alpha.py");
+    let beta = root.join("beta.py");
+
+    let storage = fresh_storage(root);
+    let mut indexer = python_indexer(root, storage.clone());
+    indexer.index_all().expect("first index_all must succeed");
+
+    // Capture-before.
+    let alpha_hash_before = storage
+        .get_file_hash(&alpha)
+        .expect("read alpha hash")
+        .expect("alpha must have a stored hash after the first index");
+    let beta_hash_before = storage
+        .get_file_hash(&beta)
+        .expect("read beta hash")
+        .expect("beta must have a stored hash after the first index");
+    let total_files_before = index_state_count(&storage, "total_files");
+    let total_chunks_before = index_state_count(&storage, "total_chunks");
+    let alpha_meta_before = storage
+        .get_file_meta(&alpha)
+        .expect("read alpha meta")
+        .expect("alpha meta present");
+    let symbols_before = searchable_symbols(&storage, "alpha_fn OR beta_fn");
+
+    // Re-index with no changes.
+    indexer.index_all().expect("second index_all must succeed");
+
+    // Capture-after — every observable identical.
+    let alpha_hash_after = storage
+        .get_file_hash(&alpha)
+        .expect("read alpha hash")
+        .expect("alpha hash present");
+    let beta_hash_after = storage
+        .get_file_hash(&beta)
+        .expect("read beta hash")
+        .expect("beta hash present");
+    let alpha_meta_after = storage
+        .get_file_meta(&alpha)
+        .expect("read alpha meta")
+        .expect("alpha meta present");
+    let symbols_after = searchable_symbols(&storage, "alpha_fn OR beta_fn");
+
+    assert_eq!(
+        alpha_hash_before, alpha_hash_after,
+        "re-index of an unchanged file must not change its stored content hash"
+    );
+    assert_eq!(
+        beta_hash_before, beta_hash_after,
+        "re-index of an unchanged file must not change its stored content hash"
+    );
+    assert_eq!(
+        index_state_count(&storage, "total_files"),
+        total_files_before,
+        "total_files must be unchanged after a no-op re-index"
+    );
+    assert_eq!(
+        index_state_count(&storage, "total_chunks"),
+        total_chunks_before,
+        "total_chunks must be unchanged after a no-op re-index"
+    );
+    // FileMeta re-stamp proxy: an unchanged file must keep its exact content_hash and mtime.
+    assert_eq!(
+        alpha_meta_before.content_hash, alpha_meta_after.content_hash,
+        "FileMeta.content_hash must not be re-stamped for an unchanged file"
+    );
+    assert_eq!(
+        alpha_meta_before.mtime, alpha_meta_after.mtime,
+        "FileMeta.mtime must not be re-stamped for an unchanged file"
+    );
+    assert_eq!(
+        alpha_meta_before.chunk_count, alpha_meta_after.chunk_count,
+        "FileMeta.chunk_count must be unchanged for an unchanged file"
+    );
+    assert_eq!(
+        symbols_before, symbols_after,
+        "the searchable chunk set must be identical after a no-op re-index"
+    );
+    assert_eq!(
+        symbols_after,
+        vec!["alpha_fn".to_string(), "beta_fn".to_string()],
+        "both functions remain searchable exactly once after the no-op re-index"
+    );
+}
+
+#[test]
+fn modify_one_file_reindexes_only_that_file() {
+    // Modify ONE file of two; the incremental entry point re-indexes only that file: the modified
+    // file's new symbol becomes searchable AND its old symbol is gone, while the untouched file's
+    // chunk + stored hash are unchanged.
+    let repo = temp_repo();
+    let root = repo.path();
+    write_file(root, "changed.py", "def original_fn():\n    return 1\n");
+    write_file(root, "stable.py", "def stable_fn():\n    return 2\n");
+    let changed = root.join("changed.py");
+    let stable = root.join("stable.py");
+
+    let storage = fresh_storage(root);
+    let mut indexer = python_indexer(root, storage.clone());
+    indexer.index_all().expect("initial index_all must succeed");
+
+    let stable_hash_before = storage
+        .get_file_hash(&stable)
+        .expect("read stable hash")
+        .expect("stable hash present after initial index");
+
+    // Mutate exactly one file's content: replace the function with a new symbol.
+    write_file(root, "changed.py", "def renamed_fn():\n    return 99\n");
+
+    // Incremental entry point: re-index only the changed file by passing it explicitly.
+    let stats = indexer
+        .update_files(&[changed.clone()])
+        .expect("update_files must succeed");
+    assert_eq!(
+        stats.files_processed, 1,
+        "exactly one file was changed and passed, so exactly one is re-indexed"
+    );
+
+    // The new symbol is searchable; the old symbol is gone (chunks for the file were replaced).
+    let renamed = searchable_symbols(&storage, "renamed_fn");
+    assert_eq!(
+        renamed,
+        vec!["renamed_fn".to_string()],
+        "the modified file's new symbol must be searchable after the incremental update"
+    );
+    let original = searchable_symbols(&storage, "original_fn");
+    assert!(
+        !original.iter().any(|n| n == "original_fn"),
+        "the modified file's old symbol must no longer be searchable, got {original:?}"
+    );
+
+    // The untouched file is untouched: same hash, same searchable symbol.
+    let stable_hash_after = storage
+        .get_file_hash(&stable)
+        .expect("read stable hash")
+        .expect("stable hash present");
+    assert_eq!(
+        stable_hash_before, stable_hash_after,
+        "the untouched file's stored hash must not change during an incremental update"
+    );
+    let stable_syms = searchable_symbols(&storage, "stable_fn");
+    assert_eq!(
+        stable_syms,
+        vec!["stable_fn".to_string()],
+        "the untouched file's symbol remains searchable exactly once"
+    );
+}
+
+#[test]
+fn update_files_with_n_changed_reindexes_exactly_n() {
+    // update_files(&[..N..]) re-indexes exactly the N changed files in the list. Three files are
+    // indexed, then ALL THREE are modified and passed; files_processed must equal 3 and every new
+    // symbol must be searchable. (Each passed file is genuinely changed, so this assertion holds
+    // whether the impl force-reindexes the list or hash-filters it — see the brief's pinned
+    // `update_files` semantics.)
+    let repo = temp_repo();
+    let root = repo.path();
+    write_file(root, "f1.py", "def f1_old():\n    return 1\n");
+    write_file(root, "f2.py", "def f2_old():\n    return 2\n");
+    write_file(root, "f3.py", "def f3_old():\n    return 3\n");
+
+    let storage = fresh_storage(root);
+    let mut indexer = python_indexer(root, storage.clone());
+    indexer.index_all().expect("initial index_all must succeed");
+
+    // Modify all three.
+    write_file(root, "f1.py", "def f1_new():\n    return 11\n");
+    write_file(root, "f2.py", "def f2_new():\n    return 22\n");
+    write_file(root, "f3.py", "def f3_new():\n    return 33\n");
+
+    let mut files: Vec<PathBuf> = vec![root.join("f1.py"), root.join("f2.py"), root.join("f3.py")];
+    files.sort();
+
+    let stats = indexer
+        .update_files(&files)
+        .expect("update_files must succeed");
+    assert_eq!(
+        stats.files_processed, 3,
+        "all three passed files were changed, so exactly three are re-indexed"
+    );
+
+    for sym in ["f1_new", "f2_new", "f3_new"] {
+        let hits = searchable_symbols(&storage, sym);
+        assert!(
+            hits.iter().any(|n| n == sym),
+            "the new symbol {sym:?} must be searchable after update_files, got {hits:?}"
+        );
+    }
+    // The old symbols are replaced, not duplicated.
+    for sym in ["f1_old", "f2_old", "f3_old"] {
+        let hits = searchable_symbols(&storage, sym);
+        assert!(
+            !hits.iter().any(|n| n == sym),
+            "the old symbol {sym:?} must be gone after its file was re-indexed, got {hits:?}"
+        );
+    }
+}
+
+#[test]
+fn new_file_added_gets_indexed() {
+    // index_all in reconcile mode discovers a file added after the initial index: its symbol becomes
+    // searchable and a FileMeta row exists, without re-stamping the pre-existing file.
+    let repo = temp_repo();
+    let root = repo.path();
+    write_file(root, "existing.py", "def existing_fn():\n    return 1\n");
+
+    let storage = fresh_storage(root);
+    let mut indexer = python_indexer(root, storage.clone());
+    indexer.index_all().expect("initial index_all must succeed");
+
+    // Add a brand-new source file after the first index.
+    write_file(root, "added.py", "def added_fn():\n    return 2\n");
+    let added = root.join("added.py");
+
+    indexer
+        .index_all()
+        .expect("reconcile index_all must succeed");
+
+    // The new file's symbol is searchable and it has a FileMeta row.
+    let added_syms = searchable_symbols(&storage, "added_fn");
+    assert_eq!(
+        added_syms,
+        vec!["added_fn".to_string()],
+        "a file added after the initial index must be discovered and indexed"
+    );
+    let added_meta = storage
+        .get_file_meta(&added)
+        .expect("read added meta")
+        .expect("the newly-added file must have a files_metadata row after reconcile index_all");
+    assert_eq!(
+        added_meta.language,
+        Language::Python,
+        "the new file's metadata records its language"
+    );
+    assert_eq!(
+        added_meta.chunk_count, 1,
+        "the new single-function file contributes exactly one chunk"
+    );
+
+    // The pre-existing file is still searchable (not dropped during reconcile).
+    let existing_syms = searchable_symbols(&storage, "existing_fn");
+    assert_eq!(
+        existing_syms,
+        vec!["existing_fn".to_string()],
+        "the pre-existing file must remain indexed after a reconcile that adds a new file"
+    );
+
+    // index_state totals reflect both files.
+    assert_eq!(
+        index_state_count(&storage, "total_files"),
+        2,
+        "total_files must reflect the newly-added file"
+    );
+}
+
+#[test]
+fn deleted_file_has_chunks_removed_and_metadata_cleared() {
+    // After a full index, a file deleted from disk is reconciled by index_all: its chunks vanish
+    // from search, its FileMeta row becomes None, and index_state totals decrease accordingly.
+    let repo = temp_repo();
+    let root = repo.path();
+    write_file(root, "keep.py", "def keep_fn():\n    return 1\n");
+    write_file(root, "doomed.py", "def doomed_fn():\n    return 2\n");
+    let doomed = root.join("doomed.py");
+
+    let storage = fresh_storage(root);
+    let mut indexer = python_indexer(root, storage.clone());
+    indexer.index_all().expect("initial index_all must succeed");
+
+    // Sanity: both indexed before deletion.
+    assert_eq!(index_state_count(&storage, "total_files"), 2);
+    assert_eq!(index_state_count(&storage, "total_chunks"), 2);
+    assert!(
+        storage
+            .get_file_meta(&doomed)
+            .expect("read doomed meta")
+            .is_some(),
+        "doomed.py must have a metadata row before deletion"
+    );
+
+    // Delete the file from disk, then reconcile.
+    fs::remove_file(&doomed).expect("delete doomed.py from disk");
+    indexer
+        .index_all()
+        .expect("reconcile index_all must succeed");
+
+    // The deleted file's chunks are gone from search.
+    let doomed_syms = searchable_symbols(&storage, "doomed_fn");
+    assert!(
+        !doomed_syms.iter().any(|n| n == "doomed_fn"),
+        "the deleted file's symbol must be removed from search, got {doomed_syms:?}"
+    );
+    // Its metadata row is cleared.
+    assert!(
+        storage
+            .get_file_meta(&doomed)
+            .expect("read doomed meta")
+            .is_none(),
+        "the deleted file's files_metadata row must be cleared after reconcile"
+    );
+    // The surviving file is intact.
+    let keep_syms = searchable_symbols(&storage, "keep_fn");
+    assert_eq!(
+        keep_syms,
+        vec!["keep_fn".to_string()],
+        "the surviving file must remain indexed after a delete reconcile"
+    );
+    // Totals decreased to reflect the single remaining file/chunk.
+    assert_eq!(
+        index_state_count(&storage, "total_files"),
+        1,
+        "total_files must decrease after a file is deleted and reconciled"
+    );
+    assert_eq!(
+        index_state_count(&storage, "total_chunks"),
+        1,
+        "total_chunks must decrease after a file's chunks are removed"
     );
 }

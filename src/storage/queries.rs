@@ -14,6 +14,12 @@ INSERT INTO symbols (
 /// Delete every `symbols` row for one file.
 pub const DELETE_CHUNKS_FOR_FILE: &str = "DELETE FROM symbols WHERE file_path = ?1;";
 
+/// Delete a single file's `files_metadata` row (deletion reconciliation, §5.2).
+pub const DELETE_FILE_META: &str = "DELETE FROM files_metadata WHERE file_path = ?1;";
+
+/// Enumerate every indexed file path (drives deletion reconciliation against disk, §5.2).
+pub const ALL_INDEXED_FILES: &str = "SELECT file_path FROM files_metadata;";
+
 /// Full-text search with BM25 ranking (§6.1). Column weights bias `symbol_name` (and to a lesser
 /// degree the other indexed columns) above `chunk_text`, so a name match outranks a body-only
 /// match (test `column_weighting_respected`). FTS5 `bm25()` is lower-is-better, so ascending

@@ -2,7 +2,7 @@
 
 - **Milestone:** M5 — indexer (discovery → parse → chunk → hash → store; incremental)  ·  **Module(s):** `indexer` (+ thin `init`/`index` glue)
 - **Owner (manager):** principal-engineering-manager  ·  **Created:** 2026-06-10
-- **Status:** RED ▢  GREEN ▢  REVIEW ▢  DONE ▢
+- **Status (M5.3):** RED ✔  GREEN ✔  REVIEW ▢  DONE ▢  (M5.1/M5.2 DONE; M5.4 pending)
 - **Links:** docs/plans/M5-indexer.md · docs/ROADMAP.md#m5--indexer · docs/TEST_STRATEGY.md#indexer · docs/project_plan.md §3.2.4 / §5.1 / §5.2 · docs/TODO.md Phase 5
 
 ## Goal
@@ -340,6 +340,122 @@ M5.1 discovery API still resolves. `cargo test --all` is blocked only on this on
 (M5.1 tests in the same file compiled clean before this edit; once `Indexer`/`IndexStats` land the
 whole file compiles and all 10 indexer tests run). Hand off to **principal-engineering-lead**.
 
+### M5.3 — incremental + idempotency + delete (2026-06-10)
+
+**Tests added** (`tests/indexer_tests.rs`, appended below the M5.2 block; repos + DB built at
+runtime under `tempfile::TempDir`, reusing the existing helpers `temp_repo`/`write_file`/
+`fresh_storage`/`python_indexer`/`index_state_count` + a new `searchable_symbols` helper). All five
+sort/dedup before asserting (determinism). Added `use std::path::PathBuf;` (now used by #3).
+1. `reindex_unchanged_repo_performs_no_writes` (idempotency) — `index_all` twice over an unchanged
+   2-file repo; asserts each file's `get_file_hash`, `index_state` total_files/total_chunks, the
+   modified file's `FileMeta.content_hash`/`mtime`/`chunk_count`, and the searchable symbol set are
+   all byte-identical before/after.
+2. `modify_one_file_reindexes_only_that_file` — index 2 files, rewrite ONE
+   (`original_fn`→`renamed_fn`), call `update_files(&[changed])`; asserts the new symbol is
+   searchable, the old symbol is gone, and the untouched file's stored hash + symbol are unchanged.
+3. `update_files_with_n_changed_reindexes_exactly_n` — index 3 files, modify ALL 3, call
+   `update_files(&[f1,f2,f3])`; asserts `stats.files_processed == 3`, all 3 new symbols searchable,
+   all 3 old symbols gone (replaced not duplicated).
+4. `new_file_added_gets_indexed` — full index, add a new `.py`, re-run `index_all` (reconcile mode);
+   asserts the new symbol is searchable, its `FileMeta` exists (language Python, chunk_count 1), the
+   pre-existing file survives, and `total_files == 2`.
+5. `deleted_file_has_chunks_removed_and_metadata_cleared` — full index of 2 files, `fs::remove_file`
+   one, re-run `index_all` (reconcile); asserts the deleted symbol is gone from search,
+   `get_file_meta(deleted) == None`, the surviving file is intact, and totals dropped to 1/1.
+
+**Pinned API the engineering lead must implement (match exactly):**
+```rust
+impl Indexer {
+    // M5.3 — incremental update of an explicit file list (§5.2).
+    pub fn update_files(&mut self, files: &[PathBuf]) -> Result<IndexStats, IndexError>;
+}
+```
+
+- **`update_files` semantics (DECIDED — hash-filter + `files_processed` = files actually
+  re-indexed):** for each path in `files`, compare `compute_file_hash` vs `get_file_hash`; if equal,
+  **skip** (no delete/insert, not counted); else `delete_chunks_for_file` → re-parse → re-chunk →
+  stamp `file_path` → `insert_chunks` → `update_file_hash`, and count it in
+  `IndexStats.files_processed`. `chunks_indexed` = chunks inserted across the re-indexed files.
+  Per-file D2 isolation as in `index_all` (a single bad file is skipped, not propagated). **Test #3
+  changes every passed file**, so `files_processed == files.len()` holds whether the impl
+  hash-filters or force-reindexes — but hash-filter is the pinned/recommended choice (it keeps
+  `update_files` consistent with `index_all`'s skip-unchanged behavior and makes #1's idempotency
+  property hold for the explicit-list path too). Should `update_files` also re-stamp `index_state`
+  totals? **Recommend yes** — recompute the DB-wide totals (or apply the delta) so an incremental
+  update keeps `total_files`/`total_chunks` consistent; #2/#3 don't assert totals after
+  `update_files`, so either approach passes those two, but keeping totals correct avoids drift that
+  a later `index_all` reconcile would have to repair. State the final choice in GREEN.
+- **`index_all` incremental/reconcile semantics on a populated DB (DECIDED):** when the DB already
+  has rows, `index_all` runs incrementally — (a) skip files whose `compute_file_hash` equals the
+  stored `get_file_hash` (no writes), (b) re-index changed files (delete→re-insert), (c) index newly
+  discovered files, and (d) **reconcile deletions**: every path present in `files_metadata` that is
+  no longer returned by `discover_files` has `delete_chunks_for_file` called and its metadata row
+  removed. Then re-stamp `index_state` `total_files`/`total_chunks` to the post-reconcile DB-wide
+  totals. Tests #1 (skip-unchanged → no re-stamp), #4 (discover new), and #5 (reconcile delete +
+  totals decrease) depend on exactly this. NOTE: the current M5.2 `index_all` **always** re-indexes
+  every discovered file and never reconciles deletions, so #1/#4/#5 compile but FAIL until §5.2 lands;
+  #2/#3 compile-fail on the missing `update_files`.
+  - **Metadata-row deletion seam:** reconcile + the modify path both need to *remove* a
+    `files_metadata` row (delete case) — `storage` currently exposes `delete_chunks_for_file` (chunks
+    only) and `update_file_hash` (upsert), but **no `delete_file_meta`/row-delete**. The eng lead
+    must either add a `Storage::delete_file_meta(&Path)` (recommended — small, symmetric with
+    `delete_chunks_for_file`; storage owns it) or delete the row via an existing path. Pin the choice
+    in GREEN; tests assert the *observable* (`get_file_meta(deleted) == None`), not the method name.
+  - **Enumerating known files for reconcile:** detecting "in `files_metadata` but not on disk"
+    requires listing the stored file paths. There is currently no `Storage` method to enumerate
+    `files_metadata` keys. The eng lead will likely need a `Storage::all_indexed_files() ->
+    Vec<PathBuf>` (or similar) — add it (storage-owned) and drive it from this slice's reconcile.
+    Tests assert only observables, so the exact name is the eng lead's choice.
+- `detect_changed_files(&self, files: &[PathBuf]) -> Result<Vec<PathBuf>, IndexError>` may stay
+  **private**; it is NOT tested directly (the suite exercises it through `update_files`/`index_all`).
+
+**Idempotency observability approach + limitation (#1):** an integration test cannot spy on SQLite
+to prove "no DELETE/INSERT was issued". The proxy used is: (i) stored `get_file_hash` per file
+unchanged, (ii) `index_state` totals unchanged, (iii) the modified file's `FileMeta.content_hash` /
+`mtime` / `chunk_count` unchanged (a re-index of an unchanged file would re-stamp these via
+`update_file_hash`, since `compute_file_hash` re-mixes the same content+mtime → same value but the
+write still happens; the **stronger** signal the impl must satisfy is that it SKIPS the write
+entirely so nothing is even re-stamped), and (iv) the searchable symbol set unchanged (a
+delete+re-insert would change rowids/ordering and risk dupes). Limitation: because the recomputed
+hash is identical for unchanged content, asserting the *value* of `content_hash`/`mtime` cannot
+distinguish "skipped the write" from "re-wrote the identical value" — it only catches a *wrong*
+re-stamp. The load-bearing guarantee that no write was issued is enforced at the unit level by the
+eng lead's hash-compare skip in `detect_changed_files` (recommend a `#[cfg(test)]` unit test in
+`pipeline.rs` asserting `detect_changed_files` returns empty for an unchanged repo); this integration
+test pins the observable invariants. Documented here per the brief's request.
+
+**RED output** (`cargo test --all` and `cargo test --all --test indexer_tests`, PATH-prefixed with
+`$HOME/.cargo/bin`):
+```
+   Compiling codecache v0.1.0 (C:\Users\ehlee\workspace\projects\CodeCache)
+error[E0599]: no method named `update_files` found for struct `Indexer` in the current scope
+   --> tests\indexer_tests.rs:559:10
+    |
+558 |       let stats = indexer
+    |  _________________-
+559 | |         .update_files(&[changed.clone()])
+    | |         -^^^^^^^^^^^^ method not found in `Indexer`
+    |
+error[E0599]: no method named `update_files` found for struct `Indexer` in the current scope
+   --> tests\indexer_tests.rs:622:10
+    |
+621 |       let stats = indexer
+    |  _________________-
+622 | |         .update_files(&files)
+    | |         -^^^^^^^^^^^^ method not found in `Indexer`
+    |
+error: could not compile `codecache` (test "indexer_tests") due to 2 previous errors
+```
+
+**Mixed-RED state (expected, per brief):** `update_files` does not exist → tests #2/#3 **compile-fail**,
+which blocks the whole `indexer_tests` target, so #1/#4/#5 (which compile) cannot run yet. Once
+`update_files` lands the target compiles and the RED resolves to: #2/#3 pass, and #1/#4/#5 **fail by
+assertion** because the current `index_all` always re-indexes and never reconciles deletions —
+exactly the §5.2 behavior the eng lead must add. The M5.1+M5.2 tests in the same file are unchanged
+and will pass again once the target compiles. Fails for the right reason (missing API + missing
+incremental/reconcile logic), no typos/spurious warnings (the new `PathBuf` import is used by #3).
+Hand off to **principal-engineering-lead**.
+
 ## GREEN — engineering lead
 
 ### M5.1 — discovery + language detection (2026-06-10)
@@ -550,6 +666,80 @@ fmt-on-edit gate that formats every `.rs`.
 
 Hand off to **performance-bench-engineer** (cold-index bench skeleton) then **code-reviewer**.
 
+### M5.3 — incremental + idempotency + delete (2026-06-10) — engineering lead
+
+**Implemented** (matches the RED-pinned signatures exactly; no signature deviation):
+- `src/indexer/pipeline.rs`:
+  - `detect_changed_files(storage, &[PathBuf]) -> Result<Vec<PathBuf>, IndexError>` — for each
+    candidate, `hasher::compute_file_hash` vs stored `storage.get_file_hash`; equal ⇒ skip,
+    differ/absent ⇒ changed. A file whose hash can't be computed is treated as *changed* (the
+    caller's D2 path isolates the failure rather than silently dropping it). This is the
+    **no-write predicate**: an unchanged file is never in the re-index set.
+  - `reindex_file(parser, storage, path) -> Result<usize, IndexError>` — `delete_chunks_for_file`
+    **first** (no stale/duplicate chunks across re-indexes), then the existing `index_file` path
+    (re-parse → re-chunk → `insert_chunks` → `update_file_hash`). Reuses M5.2 `index_file` exactly.
+  - `#[cfg(test)] mod tests::detect_changed_files_empty_for_unchanged_repo` — unit test locking the
+    no-write guarantee: after indexing a file, `detect_changed_files` over the untouched file is
+    empty.
+- `src/indexer/mod.rs`:
+  - `Indexer::update_files(&mut self, files: &[PathBuf]) -> Result<IndexStats, IndexError>` —
+    `detect_changed_files` over the explicit list → `reindex_each` (delete-first, D2-isolated) →
+    `restamp_index_state`. `files_processed` = files actually re-indexed (hash-filter, per the
+    pinned semantics; tests #2/#3 change every passed file so the count matches either way).
+  - `index_all` rewritten to **incremental + reconcile**: discover → `detect_changed_files`
+    (skip-unchanged = no writes) → `reindex_each(changed)` → reconcile deletions (every
+    `all_indexed_files()` path not in the discovered `HashSet` ⇒ `delete_chunks_for_file` +
+    `delete_file_meta`) → `restamp_index_state`.
+  - private `reindex_each` (accumulate stats over delete-first re-index, D2 match-isolation) and
+    `restamp_index_state` (recompute `total_files` = `files_metadata` row count, `total_chunks` =
+    summed `chunk_count`, write both as decimal strings).
+
+**Storage methods added** (internal CRUD, symmetric with existing schema; plan §3.2.2 updated):
+- `Storage::delete_file_meta(&Path) -> Result<()>` (`DELETE FROM files_metadata WHERE file_path=?1`)
+  — symmetric with `delete_chunks_for_file`; deleting an unknown file is a no-op (0 rows). Used by
+  the reconcile path (delete case in `index_all`).
+- `Storage::all_indexed_files() -> Result<Vec<PathBuf>>` (`SELECT file_path FROM files_metadata`,
+  `prepare_cached` + `query_map`) — enumerates the indexed set to (a) reconcile against disk and
+  (b) recompute DB-wide totals. Follows the existing `Arc<Mutex<Connection>>` + typed `StorageError`
+  + prepared-statement style. Query constants `DELETE_FILE_META` / `ALL_INDEXED_FILES` in
+  `queries.rs`.
+
+**Idempotency / no-writes guarantee (test #1):** an unchanged file fails the
+`detect_changed_files` hash compare, so it is never passed to `reindex_each` — no
+`delete_chunks_for_file`, no `insert_chunks`, no `update_file_hash`. Its stored hash, `FileMeta`
+(content_hash/mtime/chunk_count) and chunk rowids are physically untouched on a re-run. The compare
+holds equal because the stored `files_metadata.content_hash` **is** the value `compute_file_hash`
+returns (content+mtime xxhash3-128, same 32-hex format) — `index_file` stores exactly the hash
+`detect_changed_files` recomputes, so a second unchanged run sees no delta. The restamp on the skip
+path is a no-op write of the same totals (totals are recomputed from the unchanged `files_metadata`),
+so `total_files`/`total_chunks` are byte-identical. Locked at unit level by
+`detect_changed_files_empty_for_unchanged_repo`.
+
+**Reconcile logic (tests #4/#5):** `index_all` builds a `HashSet` of the discovered on-disk paths,
+then for each `all_indexed_files()` entry not in that set, deletes its chunks + metadata row.
+New files (#4) are picked up because they have no stored hash ⇒ `detect_changed_files` flags them
+changed. Deleted files (#5) are evicted by the reconcile pass and `restamp_index_state` then drops
+totals to the surviving counts (recompute-from-`files_metadata`, not delta arithmetic, so it can't
+drift).
+
+**Plan edit:** `docs/project_plan.md` §3.2.2 — added `delete_file_meta` and `all_indexed_files` to
+the `Storage` impl surface with comments explaining the M5.3 reconcile rationale (plan-first, per
+"change the plan before diverging"). No signature changes to the indexer API (`update_files` already
+matched §3.2.4).
+
+**Gate output (PATH-prefixed `$HOME/.cargo/bin`, all four green):**
+```
+cargo build                                  → Finished (clean)
+cargo clippy --all-targets -- -D warnings    → Finished (no warnings)
+cargo test --all                             → all green; indexer 15/15 (5 M5.1 + 5 M5.2 + 5 M5.3)
+cargo fmt --all -- --check                   → clean (exit 0)
+```
+`tests/indexer_tests.rs`: 15 passed / 0 failed. Whole suite: **92 tests** total (up from 86 by the
+5 new M5.3 integration tests + 1 new `pipeline` unit test). M5.1/M5.2 tests unchanged and green;
+storage 18/18 green after the two new methods.
+
+Hand off to **code-reviewer**.
+
 ### M5.2 — full index (`index_all`) + chunker single-pass cross-refs (2026-06-10) — **APPROVE**
 
 Reviewed: `src/indexer/mod.rs`, `src/indexer/pipeline.rs`, `src/chunker/mod.rs` (diff),
@@ -614,3 +804,79 @@ Findings (all non-blocking — do NOT fix this slice):
   ~500 LOC). Cosmetic; align the header to the actual ~500 LOC / 2-fn-per-file figure.
 
 Slice M5.2 is DONE-eligible. Hand back to manager.
+
+### M5.3 — incremental + idempotency + delete (2026-06-10) — **APPROVE**
+
+Reviewed: `src/indexer/mod.rs` (index_all rewrite, update_files, reindex_each, restamp_index_state),
+`src/indexer/pipeline.rs` (detect_changed_files, reindex_file, the #[cfg(test)] unit test),
+`src/storage/mod.rs` + `queries.rs` (delete_file_meta, all_indexed_files), `tests/indexer_tests.rs`
+(5 new tests), `src/indexer/CLAUDE.md`, `src/storage/CLAUDE.md`, `docs/project_plan.md` §3.2.2.
+Re-ran: indexer_tests 15/15, clippy --all-targets -D warnings (clean), fmt --check (clean).
+
+**Verdict: APPROVE.** Correct, idiomatic, aligned; no blockers, no majors.
+
+Correctness confirmed (highest-scrutiny items):
+- **Idempotency / no-writes (test #1).** `detect_changed_files` reads `get_file_hash` and compares
+  to `compute_file_hash`; equal ⇒ the file is NOT in the `reindex_each` set, so no
+  delete_chunks_for_file / insert_chunks / update_file_hash fires. CRITICAL equality holds: the
+  stored `files_metadata.content_hash` IS exactly what `compute_file_hash` returns — `index_file`
+  builds FileMeta.content_hash from the same `compute_file_hash(path)` call and stores it via
+  `update_file_hash`, so the second run's recompute (same content + same mtime → xxh3 over
+  content+mtime.to_le_bytes()) yields the identical 32-hex string. No mtime read-skew risk: both
+  write-time and compare-time mtime come from `fs::metadata(path).modified()` truncated to whole
+  epoch seconds, and the file is untouched between runs, so the seconds value is stable. Verified
+  by the unit test `detect_changed_files_empty_for_unchanged_repo` and the integration invariants.
+- **restamp on the unchanged run is value-stable.** `restamp_index_state` recomputes
+  total_files/total_chunks from `files_metadata` (unchanged on a skip run), so it rewrites the same
+  two `index_state` values — test #1's value-equality assertions pass. Re-stamping two scalar rows
+  every `index_all` is a strictly-bounded write (2 rows, independent of repo size) and does not
+  touch `symbols`/`files_metadata`, so it does not violate the load-bearing no-writes intent (no
+  chunk churn, no FileMeta re-stamp, no rowid changes). Acceptable; logged as a nit below.
+- **Reconcile path equality (test #5) is sound.** Both sides of the `on_disk.contains(&stored)`
+  check use the same canonical string form: stored paths are written as `path.to_string_lossy()`
+  of the absolute-under-root path `discover_files` returned; `all_indexed_files()` reconstructs
+  `PathBuf::from(that_string)`; the `on_disk` HashSet holds the very same `discover_files` output
+  this run. Same origin ⇒ component-wise PathBuf equality matches. No risk of failing-to-reconcile
+  or wrongly-deleting a live file. delete_chunks_for_file + delete_file_meta both run for an evicted
+  path, then restamp drops totals to survivors (recompute-from-table, cannot drift) — totals 1/1.
+- **update_files (tests #2/#3).** hash-filter via detect_changed_files; reindex_file does
+  delete_chunks_for_file BEFORE index_file, so old symbols are replaced not duplicated;
+  files_processed counts only re-indexed files. Untouched sibling's hash/symbol unchanged (D2 +
+  per-file isolation preserved). Test #3 changes all 3 ⇒ files_processed == 3.
+- **New file (test #4).** No stored hash ⇒ detect_changed_files flags it changed ⇒ indexed;
+  pre-existing file is unchanged (skipped, survives); totals → 2.
+- **Storage additions.** delete_file_meta: prepared SQL, params-bound, unknown path = 0-row no-op
+  (correct, test #5's surviving-file case relies on it not over-deleting). all_indexed_files:
+  prepare_cached + query_map, typed `?` propagation, no reachable unwrap/expect/panic, style matches
+  existing methods. queries.rs constants documented. plan §3.2.2 edit is accurate and minimal
+  (adds exactly the two signatures with rationale comments).
+- **Rules.** No reachable unwrap/expect/panic in production; IndexError typed with source() chain;
+  Result+? / map_err throughout. clippy --all-targets -D warnings clean; fmt clean.
+- **Carry-over (M5.2 follow-up).** reindex_each inherits the same silent D2 swallow
+  (`Err(_e) => stats.files_skipped... ` — there is still no files_skipped counter and the error is
+  dropped). This is the already-logged M5.2 non-blocking follow-up now also covering reindex_each —
+  NOT a new regression. Re-logged below for the manager.
+
+Tests: genuine, not weakened. Real searchable-symbol set comparisons (exact vec equality), FileMeta
+field asserts, index_state totals parsed to usize, before/after invariants. The new pipeline unit
+test locks the no-write predicate at the level the integration test cannot reach. Deterministic
+(sorted/deduped). No assertion relaxed to is_ok().
+
+Findings (all non-blocking nits — do NOT fix this slice):
+- minor (carry-over, observability) — `src/indexer/mod.rs` reindex_each `Err` arm — per-file D2
+  failures are still counted-as-skipped silently with no IndexStats.files_skipped field and no
+  log::warn. Same follow-up flagged in M5.2 review; now also applies to the incremental path. A repo
+  where some files fail to (re)index looks identical to a clean run at the API boundary. Recommend
+  the manager keep the single open follow-up (add files_skipped + a warn-log) for M5.4/M7.
+- minor (efficiency) — `src/indexer/mod.rs` restamp_index_state — recomputes totals via
+  all_indexed_files() then a per-path get_file_meta (N+1 queries) where a single SELECT COUNT(*) /
+  SUM(chunk_count) FROM files_metadata would do. Correct and bounded for M5 scale; the `if let
+  Some(meta)` guard is dead-defensive (every all_indexed_files() path has a meta row by
+  construction). Optional storage helper (e.g. `index_totals()`) could fold this into one query if
+  M10 perf wants it. No action this slice.
+- minor (no-op write note) — restamp runs on every index_all/update_files including pure-skip runs,
+  rewriting the two index_state scalars even when nothing changed. Harmless (test #1 asserts value
+  not write-count; 2 fixed rows), but if a stricter "zero writes on unchanged" guarantee is ever
+  wanted, gate the restamp behind `!changed.is_empty() && no reconcile deletions`. Note only.
+
+Slice M5.3 is DONE-eligible. Hand back to manager.
