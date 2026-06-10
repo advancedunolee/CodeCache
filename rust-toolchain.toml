@@ -1,0 +1,6 @@
+# Pin the toolchain so local == CI (ENGINEERING_PLAN §5). Bump deliberately, in lockstep with
+# .github/workflows/ci.yml.
+[toolchain]
+channel = "1.85.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

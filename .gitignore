@@ -19,3 +19,55 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Claude Code — open-source policy: the SHARED agent team is committed so anyone
+# who clones the repo (and CI) gets it. Only personal/local/transient files are
+# ignored. TRACKED on purpose: .claude/agents, .claude/skills, .claude/hooks,
+# .claude/briefs, .claude/settings.json, and every CLAUDE.md.
+# ─────────────────────────────────────────────────────────────────────────────
+.claude/settings.local.json
+.claude/**/*.local.json
+.claude/**/*.local.*
+.claude/logs/
+.claude/cache/
+.claude/.cache/
+.claude/scratch/
+.claude/tmp/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Secrets & sensitive files — NEVER commit
+# ─────────────────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.local.env
+secrets.*
+*.secret
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+credentials.json
+*.credentials
+.netrc
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CodeCache local index — regenerable & can be large; keep config, drop the DB
+# ─────────────────────────────────────────────────────────────────────────────
+.codecache/*.db
+.codecache/*.db-shm
+.codecache/*.db-wal
+.codecache/cache/
+# (.codecache/config.toml is intentionally tracked)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OS / editor noise
+# ─────────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.vscode/

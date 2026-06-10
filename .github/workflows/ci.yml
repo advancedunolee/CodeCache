@@ -1,0 +1,57 @@
+# CI — mirrors the local quality gates exactly (docs/ENGINEERING_PLAN.md §5):
+#   Format → cargo fmt --check
+#   Lint   → cargo clippy --all-targets -- -D warnings
+#   Tests  → cargo test --all
+# The toolchain is pinned by rust-toolchain.toml (1.85.0) so local == CI. Caching is mandatory:
+# rusqlite `bundled` + the tree-sitter grammars compile C, making a cold build slow.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  gates:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Honors rust-toolchain.toml (channel 1.85.0 + rustfmt + clippy components).
+      - name: Install Rust toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add rustfmt clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Format (gate 1)
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (gate 2)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test (gate 3)
+        run: cargo test --all
