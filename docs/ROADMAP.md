@@ -49,11 +49,13 @@ A milestone is *done* only when its exit criteria are met under the Definition o
 - **Exit**: ranking deterministic; `--max-tokens` respected exactly; empty/no-match queries
   handled; latency bench wired (perf engineer).
 
-### M7 — `formatter` + `cli`
+### M7 — `formatter` + `cli`  · **DONE 2026-06-12** (M7.1 e360818 · M7.2 50e3eb0 · M7.3 d0d6a0f · M7.4 commit pending)
 - **Work**: TOON/JSON/text formatters; `clap` commands `init/index/update/query/status/config/serve`;
-  **agent-first output ordering** (signature/skeleton before bodies — D13).
-- **Exit**: golden-output tests per format; CLI arg parsing + error messages tested; e2e
-  `init→index→query` through the binary.
+  **agent-first output ordering** (signature/skeleton before bodies — D13, text format; TOON locator-only).
+- **Exit** ✓: golden-output tests per format (6, JSON round-trips); CLI arg parsing + error/exit-code
+  tested (11 cli_tests); e2e `init→index→query` + failure paths through the binary (5 e2e_cli). 141
+  tests green, all four gates clean (Rust 1.85). Added D18 (additive `Config::save`) for `config`
+  read/write; `serve` is a clean M8 stub. Reviewer APPROVED all four slices (0 findings).
 
 ### M8 — `mcp_server`
 - **Entry**: evaluate the official MCP Rust SDK (`rmcp`) vs hand-rolled JSON-RPC; pin a version

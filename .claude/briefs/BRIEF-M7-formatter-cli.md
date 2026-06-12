@@ -2,7 +2,7 @@
 
 - **Milestone:** M7 — formatter + cli  ·  **Module(s):** `formatter`, `cli`, `main.rs`
 - **Owner (manager):** principal-engineering-manager  ·  **Created:** 2026-06-12
-- **Status (per slice):** M7.1 RED ✓ GREEN ✓ REVIEW ✓ DONE ✓ (e360818) · M7.2 RED ✓ GREEN ✓ REVIEW ✓ DONE ✓ (50e3eb0) · M7.3 RED ▶ · M7.4 ▢
+- **Status (per slice):** M7.1 DONE (e360818) · M7.2 DONE (50e3eb0) · M7.3 RED ✓ GREEN ✓ REVIEW ✓ DONE ✓ (d0d6a0f) · M7.4 RED ▶
 
 ## Manager notes for M7.3 (handlers + status) — real APIs the handlers delegate to
 - **init:** `codecache::init(project_root: &Path) -> Result<(), AppError>` — CLI passes the resolved
@@ -407,6 +407,68 @@ GREEN.
 - **update path resolution:** the test passes a cwd-relative `fresh.py` with `.current_dir(root)`;
   the handler must resolve positional `<FILE>` args against the working dir and feed them to
   `Indexer::update_files`. (No glob is exercised — a concrete path is passed.)
+
+### M7.4 — e2e binary — RED landed 2026-06-12
+
+**New file added — `tests/e2e_cli.rs`** (5 tests, named per the slice). They drive the BUILT
+binary via `assert_cmd::Command::cargo_bin("codecache")` + `tempfile::TempDir` +
+`.current_dir(tmp)`, so the FULL lifecycle (cwd-relative `.codecache/` creation, db-path
+resolution, indexing, retrieval, formatting, exit-code mapping) runs through `main.rs` on a real
+on-disk fixture repo. No library internals touched — the only contract under test is binary
+stdout/stderr/exit-code.
+
+**Fixture + symbol used:** `tests/fixtures/python/enriched_module.py` (committed), copied into each
+temp root as `module.py` (1 Python file / 3 chunks: `hash_password` fn + `UserService` class +
+`register` method). Stable query target = `hash_password`. We copy the committed fixture into the
+temp dir rather than indexing the CodeCache repo itself, so the fixture stays deterministic.
+
+**The 5 tests + exactly what each pins:**
+1. `e2e_init_index_query_happy_path` — chained `init` (exit 0 + `.codecache/{config.toml,index.db}`
+   exist) → `index` (exit 0; stdout reports `file`/`chunk` + the deterministic `1`/`3` counts) →
+   `query hash_password` (exit 0; stdout contains `hash_password` AND a `module.py:` line locator).
+2. `e2e_query_json_is_parseable_end_to_end` — `query hash_password --format json` exit 0; stdout
+   parses via `serde_json::from_str` into a `Value` whose `chunks[]` array is non-empty and contains
+   a chunk with `symbol_name` == `hash_password` (proves formatter → stdout through the binary, not
+   just the library).
+3. `e2e_query_before_init_errors` (FAILURE path) — fresh temp dir, NO `.codecache/`; `query anything`
+   → NONZERO + non-empty stderr + no `panicked` on either stream. Pins "not initialized → nonzero".
+4. `e2e_bad_query_or_missing_db_exits_nonzero` (FAILURE path) — `status --db-path
+   <missing_dir>/index.db` (parent dir does not exist, so the db can never be created) → NONZERO +
+   non-empty stderr + no panic. Pins "operation needing an index, run without one, fails cleanly".
+5. `e2e_index_is_incremental_on_rerun` (optional) — `init` → `index` → `index` again still exits 0;
+   `hash_password` stays queryable afterward. Proves the binary path survives a re-index.
+
+**Result — `cargo test --test e2e_cli` → 5 passed; 0 failed:**
+```
+running 5 tests
+test e2e_bad_query_or_missing_db_exits_nonzero ... ok
+test e2e_query_before_init_errors ... ok
+test e2e_init_index_query_happy_path ... ok
+test e2e_query_json_is_parseable_end_to_end ... ok
+test e2e_index_is_incremental_on_rerun ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+**Honest RED status — GREEN-on-arrival; NO GREEN step needed.** As the brief anticipated, M7.3
+already shipped the handlers, so M7.4 is a verification/lock-in slice and all 5 pass immediately.
+The value added is the dedicated full-lifecycle e2e file + the explicit failure-path/exit-code
+coverage. The tests are NOT vacuously green: they assert real stdout substrings (the symbol + a
+`module.py:` locator), a parsed JSON `chunks[]` carrying the symbol, and exact exit codes — they
+would fail if any wiring regressed.
+
+**Failure paths verified to genuinely assert NONZERO (not accidentally green on exit 0).** Ran both
+manually against the built binary: each exits **1** with a real stderr message and no panic:
+- `query` before init → `Error: could not open index database at <root>/.codecache/index.db` →
+  `sqlite error: unable to open database file` (exit 1). The `.codecache/` parent dir doesn't exist,
+  so `Storage::new` (`Connection::open`) can't create the db → clean nonzero. The "not initialized →
+  nonzero" contract is already honored by the existing handler; no fix required.
+- `status --db-path <missing_dir>/index.db` → same `unable to open database file` (exit 1),
+  deterministic because the parent dir can never be auto-created.
+
+So both failure-path tests pin a genuine nonzero + stderr contract that the current handlers already
+satisfy. **No handler behavior must change for M7.4.** Recommend manager mark M7.4 RED = verification
+complete and route to code-reviewer (no GREEN step). Not committed; `docs/TODO`/CLAUDE.md not touched
+(per the brief).
 
 ## GREEN — engineering lead
 
@@ -832,3 +894,61 @@ config/CLAUDE.md status already reflect M7.3). Consider filing the empty+text do
 
 ## OUTCOME — manager
 <per-slice: aligned? TODO + module CLAUDE.md updated? committed? follow-ups?>
+
+### M7.4 — e2e binary — VERDICT: APPROVE (2026-06-12, code-reviewer)
+
+Verification-only slice. `git diff d0d6a0f` (since M7.3) shows ONLY the new untracked
+`tests/e2e_cli.rs` + this brief — nothing under `src/` changed; no test was weakened. All four
+gates green on the full workspace:
+- `cargo test --test e2e_cli` -> 5 passed / 0 failed.
+- `cargo test --all` -> 141 passed / 0 failed (e2e_cli adds 5; no regression).
+- `cargo clippy --all-targets -- -D warnings` -> exit 0 (clean).
+- `cargo fmt --check` -> exit 0 (clean).
+
+Non-vacuity / contract lock-in (all confirmed against the handlers + formatters, not just the docs):
+1. Happy path (e2e_init_index_query_happy_path): drives init->index->query as 3 separate subprocess
+   invocations in one TempDir; asserts on-disk `.codecache/{config.toml,index.db}` exist after init,
+   the index report substrings (`file`/`chunk`/`1`/`3` for the 1-file/3-chunk enriched fixture), and
+   that the text query stdout carries BOTH `hash_password` AND a `module.py:` locator. The locator is
+   real (text.rs writes `<file>:<start_line>-<end_line>`), so this genuinely exercises retriever ->
+   text formatter -> stdout end-to-end, not `.success()` alone.
+2. JSON e2e (e2e_query_json_is_parseable_end_to_end): captures stdout, parses it with serde_json,
+   asserts a non-empty `chunks[]` array AND that some chunk's `symbol_name` contains `hash_password`.
+   Verified honest: json.rs emits `symbol_name` as the BARE name (qualification is text-only), and
+   query.rs pipes JSON straight through (no `No results found.` short-circuit for JSON), so a broken
+   formatter/wiring would fail this, not pass it vacuously.
+3. Failure path query-before-init (e2e_query_before_init_errors): empty TempDir, precondition-asserts
+   no index.db, then requires `.failure()` (NONZERO) + non-empty stderr + NO `panicked` on either
+   stream. Storage::new opens a path under a non-existent `.codecache/` -> SQLite can't create the
+   file -> typed StorageError -> anyhow -> nonzero. Would catch a regression where query wrongly
+   exits 0 on a missing index.
+4. Failure path missing-db (e2e_bad_query_or_missing_db_exits_nonzero): `status --db-path
+   <root>/nonexistent_dir/index.db`. Confirmed deterministic — `Connection::open` (default
+   CREATE flag) creates the db FILE but never the missing parent DIR, so SQLite returns
+   "unable to open" every time. Pins the clean-nonzero + no-panic contract for an op needing an index.
+5. Incrementality (e2e_index_is_incremental_on_rerun): second `index` on unchanged sources still
+   exits 0 and the symbol stays queryable — proves the binary path survives a re-index.
+
+Determinism / isolation: every test runs in a fresh `tempfile::TempDir` via `.current_dir()`, copying
+the committed `enriched_module.py` in as `module.py` — never indexes the CodeCache repo itself; no
+cwd leakage, no ordering/shared-state coupling; parallel-safe (each `cc()` is a fresh Command).
+
+Idiomatic test code: `assert_cmd` + `predicates` usage is clean; test-side `expect()` is confined to
+setup (binary build, temp-dir/file creation, UTF-8/JSON decode of captured output) where a panic is
+the correct "test harness broke" signal and does not mask an assertion. clippy clean under -D warnings.
+
+ROADMAP M7 exit criteria: "E2E init->index->query through the built binary on a fixture repo" — MET
+(test 1, + JSON variant in test 2). "bad-args / exit-code" criterion — MET (tests 3 & 4 pin nonzero +
+stderr + no-panic; cli_tests.rs M7.2 already covers clap-level bad-args/unknown-command nonzero).
+
+Findings: none (blocker/major/minor). Optional non-blocking nits (NOT required for approval):
+- Test 1's `.stdout(contains("1"))` / `contains("3"))` match any `1`/`3` anywhere in the report
+  (incl. the `T ms` duration), so they assert the counts are PRESENT but don't bind them positionally
+  to "file(s)"/"chunk(s)". The `file`/`chunk` substring asserts + the deterministic fixture make this
+  adequate; a tighter `contains("1 file")`/`contains("3 chunk")` would lock the counts harder.
+- Test 4 is titled "bad_query_or_missing_db" but exercises only the missing-db arm via `status`; the
+  bad-query/arg arm is covered in cli_tests.rs (M7.2). No gap, just a slightly broad name.
+
+Slice M7.4 is APPROVED — the e2e file is a genuine, non-vacuous lock-in of the lifecycle + exit-code
+contracts, and the M7 phase exit criteria are met end-to-end through the built binary. Manager: mark
+DONE once docs/TODO.md Phase 7 + tests/CLAUDE.md status reflect the M7.4 e2e file.

@@ -177,7 +177,7 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
   M6's only obligation: `QueryResult` chunks keep `file_path` (already true) so M8 can hash-check
   result files without new retriever API.
 
-## Phase 7 — formatter + cli (M7) · plan: [plans/M7-formatter-cli.md](plans/M7-formatter-cli.md) · brief: [.claude/briefs/BRIEF-M7-formatter-cli.md](../.claude/briefs/BRIEF-M7-formatter-cli.md)
+## Phase 7 — formatter + cli (M7) · plan: [plans/M7-formatter-cli.md](plans/M7-formatter-cli.md) · brief: [.claude/briefs/BRIEF-M7-formatter-cli.md](../.claude/briefs/BRIEF-M7-formatter-cli.md) · **DONE 2026-06-12**
 - [x] **M7.1 formatters** (golden TOON/JSON/text) → DONE 2026-06-12: `Format { Toon, Json, Text }` +
       pure `format(&QueryResult, query, fmt) -> String` (`src/formatter/{mod,toon,json,text}.rs`); 6
       golden tests green; reviewer APPROVED (0 findings). TOON = locator-only `file:start-end` list;
@@ -196,7 +196,11 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
       per-symbol_type deferred, no schema change). **D18** additive `Config::save` for `config`
       read/write. Empty text query → `No results found.` (CLI UX; formatter golden unchanged). 11/11
       cli_tests green; reviewer APPROVED (0 findings). `serve` = clean M8 stub.
-- [ ] M7.4 E2E through the built binary (init→index→query, assert_cmd) → test-lead → engineering-lead
+- [x] **M7.4 E2E through the built binary** → DONE 2026-06-12: `tests/e2e_cli.rs` (5 tests, assert_cmd
+      + TempDir) drives the built binary on a copied fixture repo — init→index→query happy path,
+      `--format json` parses end-to-end, and failure paths (query/status without an index) exit
+      nonzero with stderr + no panic. Verification-only (M7.3 handlers already GREEN); reviewer
+      APPROVED (0 findings). ROADMAP M7 exit criteria met end-to-end.
 
 ## Phase 8 — mcp_server (M8) · plan: [plans/M8-mcp-server.md](plans/M8-mcp-server.md)
 - [ ] **Entry (D15)**: spike official MCP Rust SDK `rmcp` vs hand-rolled JSON-RPC; manager

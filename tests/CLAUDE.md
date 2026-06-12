@@ -15,6 +15,11 @@ directory holds the wider integration/E2E/property surface.
 | `parser_tests.rs` | M3 parser integration: exact byte spans, method/decorator/nested, ERROR-rate (D2). | M3 |
 | `chunker_tests.rs` | M4 chunker integration: AST→Chunk, D3 enrichment, D2 heuristic fallback flag. | M4 |
 | `chunker_proptest.rs` | M4 property: spans in-bounds; chunks disjoint-or-nested; child contained in parent. | M4 |
+| `retriever_tests.rs` | M6 retriever integration: BM25 ranking determinism, dedup, token budget. | M6 |
+| `formatter_tests.rs` | M7.1 formatter golden outputs: TOON/JSON/text + JSON round-trip + D13 text ordering (goldens in `fixtures/golden/`). | M7 |
+| `cli_tests.rs` | M7.2/M7.3 CLI: clap parsing/defaults/exit-codes + handler behavior (init/index/update/query/status/config; serve stub) via `assert_cmd`. | M7 |
+| `e2e_cli.rs` | M7.4 full E2E through the built binary: init→index→query happy path + JSON parse + failure-path nonzero/exit-code on a copied fixture repo. | M7 |
+| `fixtures/golden/` | Committed golden formatter outputs (`query_{basic,empty}.{toon,json,txt}`) compared CRLF→LF-normalized. | M7 |
 | `fixtures/` | Sample source trees / files used by integration + E2E tests (added as needed). | M3+ |
 
 ### `fixtures/python/` (M3 parser)
