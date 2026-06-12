@@ -13,8 +13,13 @@
 //! [`Retriever::query`] runs the M6.1 preprocessing, binds the resulting expression to
 //! `symbols MATCH ?` **parameterized** via [`crate::storage::Storage::search`] (never
 //! string-interpolated), then applies a deterministic stable tie-break, dedups overlapping
-//! same-file spans, and applies the optional `file_filter`. Token-budget packing is **M6.3** —
-//! [`QueryResult`] is assembled here but budget trimming lands next.
+//! same-file spans, and applies the optional `file_filter`.
+//!
+//! **M6.3 (token-budget packing)** lands [`estimate_tokens`] (the §6.3 char heuristic
+//! `(len/4).max(1)` over a chunk's `chunk_text`) and [`Retriever::apply_token_budget`] — a greedy,
+//! hard-stop packer that keeps the highest-ranked prefix fitting within `max_tokens`. [`query`]
+//! now packs the deduped results and reports `total_tokens` = sum over the packed chunks, while
+//! `total_results_found` stays the **pre-budget** (post-filter + dedup) count.
 
 use std::path::PathBuf;
 
@@ -30,12 +35,13 @@ const STOPWORDS: &[&str] = &[
     "me", "how", "where", "what", "that", "this", "get",
 ];
 
-/// Tunable knobs for a single query (§3.2.3). `max_tokens` is honored in M6.3 (budget packing);
-/// `max_results` bounds the FTS5 row count; `file_filter`, when `Some`, restricts results to the
-/// listed files (a **post-filter** over `chunk.file_path` — see [`Retriever::query`]).
+/// Tunable knobs for a single query (§3.2.3). `max_tokens` is the token budget honored by the
+/// M6.3 greedy packer; `max_results` bounds the FTS5 row count; `file_filter`, when `Some`,
+/// restricts results to the listed files (a **post-filter** over `chunk.file_path` — see
+/// [`Retriever::query`]).
 #[derive(Debug, Clone)]
 pub struct QueryOptions {
-    /// Token budget for the packed result set (default 4000). Enforced in M6.3.
+    /// Token budget for the packed result set (default 4000). Enforced by greedy packing (§6.3).
     pub max_tokens: usize,
     /// Maximum number of FTS5 hits to fetch (default 20). Bounds in-flight chunks (§11.3).
     pub max_results: usize,
@@ -58,10 +64,10 @@ impl Default for QueryOptions {
 /// and CLI/MCP transport live downstream, so the core stays adapter-agnostic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryResult {
-    /// The retrieved chunks, best-first, after tie-break + dedup (+ budget packing in M6.3).
+    /// The retrieved chunks, best-first, after tie-break + dedup + greedy token-budget packing.
     pub chunks: Vec<SearchResult>,
-    /// Sum of estimated tokens across `chunks`. Populated by M6.3 budget packing; the
-    /// no-result paths report `0` today.
+    /// Sum of estimated tokens (§6.3) across the packed `chunks`. Always `<= QueryOptions.max_tokens`
+    /// (the pack is a fitting prefix); `0` for the empty / no-result paths.
     pub total_tokens: usize,
     /// How many results matched **before** token-budget trimming (post-filter + dedup count).
     pub total_results_found: usize,
@@ -185,15 +191,49 @@ impl Retriever {
                 .collect(),
         }
     }
+
+    /// Greedily pack the already-ranked, deduped results within `max_tokens` (§6.3). Input must be
+    /// in best-first order: we walk it front-to-back, keep each chunk whose [`estimate_tokens`]
+    /// still fits the running budget, and **hard-stop** (`break`) at the first chunk that would
+    /// push the total over `max_tokens`. This is the §3.2.3 documented surface
+    /// (`fn apply_token_budget(&self, …)`).
+    ///
+    /// **Greedy stop, not skip-and-continue:** once a chunk doesn't fit we stop entirely rather
+    /// than skipping it to squeeze in a smaller later chunk — this keeps the highest-ranked
+    /// contiguous prefix, matching §6.3's `break`. A consequence is that an **oversized first
+    /// chunk** (its own estimate already exceeds `max_tokens`) yields an **empty** pack rather than
+    /// a forced top-1; the budget is a hard ceiling the caller asked for, so we never exceed it.
+    ///
+    /// Token length is measured over each chunk's `chunk_text` (the full signature+body source —
+    /// the same text the M7 formatter emits), so the budget reflects the bytes actually delivered.
+    fn apply_token_budget(
+        &self,
+        results: Vec<SearchResult>,
+        max_tokens: usize,
+    ) -> Vec<SearchResult> {
+        let mut packed: Vec<SearchResult> = Vec::with_capacity(results.len());
+        let mut total_tokens: usize = 0;
+        for result in results {
+            let chunk_tokens = estimate_tokens(&result.chunk.chunk_text);
+            if total_tokens + chunk_tokens > max_tokens {
+                break; // Budget exhausted — hard-stop, keep the fitting prefix (§6.3).
+            }
+            total_tokens += chunk_tokens;
+            packed.push(result);
+        }
+        packed
+    }
 }
 
 impl Retrieve for Retriever {
     /// Execute a query: preprocess → (short-circuit if no tokens) → parameterized FTS5 `MATCH` →
-    /// stable tie-break → file_filter → dedup overlapping spans → assemble [`QueryResult`].
+    /// stable tie-break → file_filter → dedup overlapping spans → **greedy token-budget packing** →
+    /// assemble [`QueryResult`].
     ///
     /// An empty / all-stopword query yields no tokens; the method short-circuits to an empty,
-    /// well-formed result **without ever running `MATCH ""`** (which FTS5 rejects). Token-budget
-    /// packing is M6.3, so `total_tokens` stays `0` here and `chunks` is untrimmed.
+    /// well-formed result **without ever running `MATCH ""`** (which FTS5 rejects). Otherwise the
+    /// deduped results are packed within `options.max_tokens` (§6.3); `total_tokens` is the sum over
+    /// the packed chunks and `total_results_found` is the **pre-budget** (post-filter+dedup) count.
     fn query(&self, user_query: &str, options: QueryOptions) -> Result<QueryResult> {
         let tokens = preprocess_query(user_query);
         if tokens.is_empty() {
@@ -214,11 +254,21 @@ impl Retrieve for Retriever {
         let filtered = Self::apply_file_filter(hits, &options.file_filter);
         let deduped = Self::dedup_overlapping(filtered);
 
+        // `total_results_found` is the PRE-budget count (post-filter + post-dedup) — how many
+        // results matched before token-budget trimming (§3.2.3).
         let total_results_found = deduped.len();
+
+        // M6.3: greedily pack within the token budget, then report the sum of the packed chunks'
+        // estimated tokens. The pack is a prefix of `deduped`, so `total_tokens <= max_tokens`.
+        let packed = self.apply_token_budget(deduped, options.max_tokens);
+        let total_tokens: usize = packed
+            .iter()
+            .map(|r| estimate_tokens(&r.chunk.chunk_text))
+            .sum();
+
         Ok(QueryResult {
-            chunks: deduped,
-            // Budget packing (token sum) lands in M6.3; untrimmed here.
-            total_tokens: 0,
+            chunks: packed,
+            total_tokens,
             total_results_found,
         })
     }
@@ -283,6 +333,17 @@ fn escape_fts5_token(token: &str) -> String {
     } else {
         format!("\"{}\"", token.replace('"', "\"\""))
     }
+}
+
+/// Fast, dependency-free token estimate (§6.3): `(text.len() / 4).max(1)`, the GPT-style
+/// "1 token ≈ 4 chars" heuristic with **no tokenizer crate** in v0.1. `text.len()` is the **byte**
+/// length, so a multibyte identifier counts its UTF-8 bytes (a deliberate over-estimate vs.
+/// characters, which keeps the budget conservative). The `.max(1)` floor means even an empty or
+/// 1–3 byte chunk costs at least one token, so a tiny chunk is never "free" in the packing loop.
+/// Callers pass the chunk's `chunk_text` (full signature+body), matching what the M7 formatter
+/// emits so the budget reflects the bytes actually delivered to the agent.
+fn estimate_tokens(text: &str) -> usize {
+    (text.len() / 4).max(1)
 }
 
 #[cfg(test)]
@@ -381,5 +442,30 @@ mod tests {
         // Strict containment (nested method/class) ⇒ NOT redundant; both kept.
         assert!(!partial_overlap_or_equal(0, 100, 40, 60));
         assert!(!partial_overlap_or_equal(40, 60, 0, 100));
+    }
+
+    // ── M6.3: token estimation (§6.3 char heuristic) ────────────────────────────────────────────
+
+    #[test]
+    fn estimate_tokens_is_len_div_4_min_1() {
+        // §6.3: estimate_tokens(text) == (text.len() / 4).max(1). `len` is the BYTE length of the
+        // text. The `.max(1)` floor means any non-empty short text — and even the empty string —
+        // estimates at least 1 token, so a tiny chunk is never free.
+        assert_eq!(estimate_tokens(""), 1, "empty text floors to 1 token");
+        assert_eq!(estimate_tokens("abc"), 1, "len 3 / 4 = 0 → floored to 1");
+        assert_eq!(estimate_tokens("abcd"), 1, "len 4 / 4 = 1");
+        assert_eq!(estimate_tokens("abcdefgh"), 2, "len 8 / 4 = 2");
+        // 100-byte string ⇒ 25 tokens (matches the integration-test fixtures' arithmetic).
+        let hundred = "x".repeat(100);
+        assert_eq!(estimate_tokens(&hundred), 25, "len 100 / 4 = 25");
+        // Byte length, not char count: a 2-byte UTF-8 char counts as 2 bytes.
+        // "é" is 2 bytes; four of them = 8 bytes ⇒ 2 tokens.
+        let multibyte = "é".repeat(4);
+        assert_eq!(multibyte.len(), 8, "four 2-byte chars = 8 bytes");
+        assert_eq!(
+            estimate_tokens(&multibyte),
+            2,
+            "estimate uses byte length (8 / 4 = 2)"
+        );
     }
 }

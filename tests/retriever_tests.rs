@@ -322,3 +322,203 @@ fn file_filter_restricts_results_to_listed_files() {
         );
     }
 }
+
+// ───────────────────────── M6.3: token-budget packing (greedy, §6.3) ─────────────────────────
+//
+// The §6.3 char heuristic: estimate_tokens(text) == (text.len() / 4).max(1), counted over the
+// chunk's `chunk_text` (signature + body — the text the M7 formatter emits). Packing is greedy
+// over the already-ranked (stable-sorted, deduped) list: keep the prefix that fits and HARD-STOP
+// (`break`) at the first chunk that would push the running total over `max_tokens`. `total_tokens`
+// is the sum over the packed chunks; `total_results_found` is the pre-budget (post-filter+dedup)
+// count.
+
+/// Build a chunk whose `chunk_text` has a controlled length so token estimates are predictable.
+/// All seeded chunks share the search term "widget" so they all match; distinct byte spans avoid
+/// dedup. `len` is the exact byte length of `chunk_text` ⇒ estimate_tokens == (len/4).max(1).
+fn sized_chunk(file: &str, name: &str, span_start: usize, len: usize) -> Chunk {
+    // Body always contains the matched term "widget"; pad with 'x' to reach exactly `len` bytes.
+    let base = "widget ";
+    let mut body = String::from(base);
+    while body.len() < len {
+        body.push('x');
+    }
+    body.truncate(len);
+    debug_assert_eq!(body.len(), len);
+    chunk_at(file, name, &body, span_start, span_start + len, 1, 5)
+}
+
+#[test]
+fn packing_never_exceeds_max_tokens() {
+    // Seed several chunks each ~25 tokens (100 bytes). With a 60-token budget, the packed set's
+    // summed estimate must stay <= 60 — the headline correctness invariant (--max-tokens never
+    // exceeded).
+    let (_dir, storage) = fresh_storage();
+    let chunks = vec![
+        sized_chunk("src/a.py", "widget_a", 0, 100),
+        sized_chunk("src/b.py", "widget_b", 0, 100),
+        sized_chunk("src/c.py", "widget_c", 0, 100),
+        sized_chunk("src/d.py", "widget_d", 0, 100),
+    ];
+    storage.insert_chunks(&chunks).expect("seed");
+
+    let retriever = Retriever::new(storage);
+    let options = QueryOptions {
+        max_tokens: 60,
+        max_results: 20,
+        file_filter: None,
+    };
+    let result = retriever.query("widget", options).expect("query");
+
+    let summed: usize = result
+        .chunks
+        .iter()
+        .map(|r| (r.chunk.chunk_text.len() / 4).max(1))
+        .sum();
+    assert!(
+        summed <= 60,
+        "packed estimate {summed} must not exceed max_tokens 60"
+    );
+    assert_eq!(
+        result.total_tokens, summed,
+        "total_tokens equals the summed estimate over packed chunks"
+    );
+}
+
+#[test]
+fn greedy_stops_at_budget_keeping_top_ranked() {
+    // Each chunk is 100 bytes ⇒ 25 tokens. Budget 60 fits exactly two (25+25=50; the third would
+    // make 75 > 60 ⇒ hard-stop). Greedy keeps the top-ranked prefix and stops; it does NOT skip a
+    // too-big chunk to fit a smaller later one. All chunks tie on score, so the deterministic
+    // tie-break (file_path, start_byte) fixes the order a.py, b.py, c.py, d.py.
+    let (_dir, storage) = fresh_storage();
+    let chunks = vec![
+        sized_chunk("src/a.py", "widget_a", 0, 100),
+        sized_chunk("src/b.py", "widget_b", 0, 100),
+        sized_chunk("src/c.py", "widget_c", 0, 100),
+        sized_chunk("src/d.py", "widget_d", 0, 100),
+    ];
+    storage.insert_chunks(&chunks).expect("seed");
+
+    let retriever = Retriever::new(storage);
+    let options = QueryOptions {
+        max_tokens: 60,
+        max_results: 20,
+        file_filter: None,
+    };
+    let result = retriever.query("widget", options).expect("query");
+
+    assert_eq!(
+        result.chunks.len(),
+        2,
+        "two 25-token chunks fit in a 60-token budget; the third hard-stops packing"
+    );
+    let kept: Vec<_> = result
+        .chunks
+        .iter()
+        .map(|r| r.chunk.file_path.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        kept,
+        vec!["src/a.py".to_string(), "src/b.py".to_string()],
+        "greedy keeps the top-ranked prefix (best-first), stopping at the budget"
+    );
+}
+
+#[test]
+fn total_results_found_reflects_pre_budget_count() {
+    // Four matching chunks; a tight budget packs only two. total_results_found must report the
+    // PRE-budget count (post-filter + dedup = 4), not the packed count (2).
+    let (_dir, storage) = fresh_storage();
+    let chunks = vec![
+        sized_chunk("src/a.py", "widget_a", 0, 100),
+        sized_chunk("src/b.py", "widget_b", 0, 100),
+        sized_chunk("src/c.py", "widget_c", 0, 100),
+        sized_chunk("src/d.py", "widget_d", 0, 100),
+    ];
+    storage.insert_chunks(&chunks).expect("seed");
+
+    let retriever = Retriever::new(storage);
+    let options = QueryOptions {
+        max_tokens: 60,
+        max_results: 20,
+        file_filter: None,
+    };
+    let result = retriever.query("widget", options).expect("query");
+
+    assert_eq!(
+        result.total_results_found, 4,
+        "found count is the pre-budget (post-filter+dedup) count, not the packed count"
+    );
+    assert!(
+        result.chunks.len() < result.total_results_found,
+        "budget actually trimmed the result set for this scenario"
+    );
+}
+
+#[test]
+fn total_tokens_reported_matches_sum_of_packed() {
+    // total_tokens must equal the sum of estimate_tokens over the chunks that survive packing —
+    // not the pre-budget total. Use mixed sizes to make the sum non-trivial: 40 bytes (10 tok) +
+    // 80 bytes (20 tok) = 30 tokens fits a 35-token budget; the next chunk would overflow.
+    let (_dir, storage) = fresh_storage();
+    let chunks = vec![
+        sized_chunk("src/a.py", "widget_a", 0, 40),
+        sized_chunk("src/b.py", "widget_b", 0, 80),
+        sized_chunk("src/c.py", "widget_c", 0, 80),
+    ];
+    storage.insert_chunks(&chunks).expect("seed");
+
+    let retriever = Retriever::new(storage);
+    let options = QueryOptions {
+        max_tokens: 35,
+        max_results: 20,
+        file_filter: None,
+    };
+    let result = retriever.query("widget", options).expect("query");
+
+    let summed: usize = result
+        .chunks
+        .iter()
+        .map(|r| (r.chunk.chunk_text.len() / 4).max(1))
+        .sum();
+    assert_eq!(
+        result.total_tokens, summed,
+        "total_tokens equals the sum of packed chunk estimates"
+    );
+    // a.py(10) + b.py(20) = 30 <= 35; c.py(20) would make 50 > 35 ⇒ excluded.
+    assert_eq!(
+        result.total_tokens, 30,
+        "expected 10 + 20 = 30 tokens packed"
+    );
+    assert_eq!(result.chunks.len(), 2);
+}
+
+#[test]
+fn oversized_first_chunk_yields_empty_pack() {
+    // Edge: the single (top-ranked) chunk's own estimate exceeds the whole budget. Per §6.3's
+    // hard-stop (`if total + chunk > max_tokens { break }`), even the FIRST chunk that doesn't fit
+    // stops packing — so the packed set is EMPTY and total_tokens == 0. total_results_found still
+    // reports the pre-budget count (1). Documented choice: hard-stop, NOT keep-top-1.
+    let (_dir, storage) = fresh_storage();
+    // 400 bytes ⇒ 100 tokens, far over a 10-token budget.
+    let chunks = vec![sized_chunk("src/a.py", "widget_a", 0, 400)];
+    storage.insert_chunks(&chunks).expect("seed");
+
+    let retriever = Retriever::new(storage);
+    let options = QueryOptions {
+        max_tokens: 10,
+        max_results: 20,
+        file_filter: None,
+    };
+    let result = retriever.query("widget", options).expect("query");
+
+    assert!(
+        result.chunks.is_empty(),
+        "an oversized first chunk does not fit ⇒ empty pack (hard-stop, §6.3)"
+    );
+    assert_eq!(result.total_tokens, 0, "empty pack ⇒ zero tokens");
+    assert_eq!(
+        result.total_results_found, 1,
+        "found count still reflects the one pre-budget match"
+    );
+}

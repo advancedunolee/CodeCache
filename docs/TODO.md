@@ -147,9 +147,17 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
       `cargo test --all` (**111 passed**: 23 lib +7 retriever +3 chunker_proptest +10 chunker +5 config
       +4 e2e +11 hasher +15 indexer +14 parser +1 smoke +18 storage), `cargo build`. **DONE 2026-06-11.**
       brief: [.claude/briefs/BRIEF-M6.2-bm25-search-dedup.md](../.claude/briefs/BRIEF-M6.2-bm25-search-dedup.md)
-- [ ] **M6.3 token budget packing** — RED (never exceeds max_tokens, greedy stops keeping top-ranked,
-      total_tokens = sum packed, total_results_found = pre-budget, estimate_tokens = len/4 min 1) →
-      test-lead; `apply_token_budget` + `estimate_tokens` + `QueryResult` assembly → engineering-lead → reviewer.
+- [x] **M6.3 token budget packing** — RED (`tests/retriever_tests.rs`: `packing_never_exceeds_max_tokens`,
+      `greedy_stops_at_budget_keeping_top_ranked`, `total_tokens_reported_matches_sum_of_packed`,
+      `total_results_found_reflects_pre_budget_count`, `oversized_first_chunk_yields_empty_pack`; +
+      in-module `estimate_tokens_is_len_div_4_min_1`) → GREEN: `estimate_tokens(text)=(len/4).max(1)` over
+      `chunk_text` (byte length, M7-consistent) + `Retriever::apply_token_budget` greedy **hard-stop**
+      (§6.3 `break`; oversized first chunk ⇒ empty pack, not keep-top-1) wired into `query`;
+      `total_tokens`=Σ packed, `total_results_found`=pre-budget count. Reviewer **APPROVED**.
+      **All four gates verified green on Rust 1.85.0 (2026-06-11):** `cargo fmt --all -- --check`,
+      `cargo clippy --all-targets -- -D warnings`, `cargo test --all` (**117 passed**: 24 lib
+      +12 retriever +3 chunker_proptest +10 chunker +5 config +4 e2e +11 hasher +15 indexer
+      +14 parser +1 smoke +18 storage), `cargo build`. **DONE 2026-06-11.**
       brief: [.claude/briefs/BRIEF-M6.3-token-budget-packing.md](../.claude/briefs/BRIEF-M6.3-token-budget-packing.md)
 - [ ] **M6.4 query-latency bench** — `benches/query_bench.rs` over synthetic 100K-LOC index; p50/p95/p99;
       track p95 < 500ms (full budget gate at M10) → **performance-bench-engineer** → reviewer.

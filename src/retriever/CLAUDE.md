@@ -58,6 +58,31 @@ The search-execution half of `query` (no token budget yet — that's M6.3):
 - **`file_filter`:** documented as a **post-filter** over `chunk.file_path` (exact `PathBuf` match),
   not a SQL predicate — keeps the FTS5 query simple; M7 CLI maps `--file-filter` glob to this list.
 
+## Shipped API (M6.3 — token-budget packing)
+The §6.3 greedy packer; `query` now trims to the budget instead of returning everything:
+- `fn estimate_tokens(text: &str) -> usize` (module-private) — the §6.3 char heuristic
+  `(text.len() / 4).max(1)`, **no tokenizer crate**. `text.len()` is the **byte** length (a
+  multibyte identifier counts its UTF-8 bytes — a conservative over-estimate vs. chars). The
+  `.max(1)` floor means even empty / 1–3-byte text costs ≥ 1 token. Callers pass `chunk.chunk_text`
+  (full signature+body — the same text the M7 formatter emits, so the budget reflects bytes
+  actually delivered to the agent).
+- `Retriever::apply_token_budget(&self, results: Vec<SearchResult>, max_tokens: usize) ->
+  Vec<SearchResult>` (the §3.2.3 surface) — greedy over the already-ranked/deduped list: keep each
+  chunk whose `estimate_tokens` still fits the running total, **hard-stop** (`break`) at the first
+  that would push over `max_tokens`. Returns the fitting prefix; total, no `unwrap/expect/panic`.
+- `query` pipeline tail now: dedup → `total_results_found = deduped.len()` (**pre-budget**) →
+  `apply_token_budget(deduped, max_tokens)` → `total_tokens = Σ estimate_tokens(packed)` → assemble.
+
+### Budget semantics / decisions (pinned by tests)
+- **Length basis:** `chunk.chunk_text` (signature+body). Documented for M7 so the formatter emits
+  the same text the budget counted.
+- **Greedy stop, not skip-and-continue:** once a chunk doesn't fit we stop — we do **not** skip it
+  to squeeze a smaller later chunk in. Keeps the highest-ranked contiguous prefix (§6.3 `break`).
+- **Oversized first chunk ⇒ empty pack** (`total_tokens = 0`), **not** a forced top-1: `max_tokens`
+  is a hard ceiling the caller asked for, so the result never exceeds it. Pinned by
+  `oversized_first_chunk_yields_empty_pack`.
+- **`total_tokens <= max_tokens` always** (the pack is a fitting prefix); empty/no-token paths → 0.
+
 ## Decision Log bindings
 - **D1 (trait):** `trait Retrieve` + `Retriever` landed at **M6.2**, driven by `new`/`query` RED.
   Minimal (`query` only); the future `HybridRetriever` (embeddings) implements the same trait.
@@ -69,6 +94,9 @@ The search-execution half of `query` (no token budget yet — that's M6.3):
   + `STOPWORDS`; 7 in-module unit tests; reviewer APPROVED; all four gates green.
 - **M6.2 GREEN + APPROVED (2026-06-11):** `trait Retrieve` + `Retriever` + `query` (search/dedup/
   tie-break/file_filter); 7 integration tests in `tests/retriever_tests.rs` + 1 unit test; M6.1
-  `#[allow(dead_code)]` removed. **Gates pending main-session verification** (manager subagent
-  cannot run cargo). Token budget = M6.3.
-- **M6.3–M6.4:** pending — token-budget packing, latency bench.
+  `#[allow(dead_code)]` removed. Gates verified green by main session. Token budget = M6.3.
+- **M6.3 GREEN + APPROVED (2026-06-11):** `estimate_tokens` + `Retriever::apply_token_budget`
+  wired into `query`; `--max-tokens` is a hard ceiling. 5 new integration tests + 1 unit test
+  (`estimate_tokens_is_len_div_4_min_1`). Reviewer APPROVED. **Gates pending main-session
+  verification** (manager subagent cannot run cargo).
+- **M6.4:** pending — query-latency bench (perf engineer, p95 < 500ms).
