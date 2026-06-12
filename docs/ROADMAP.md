@@ -262,6 +262,34 @@ recall, with bootstrap CIs**, measured per overview §5 (ContextBench-Lite, thre
 arms A0–A5). M10 keeps the systems budgets as release gates and adds Layer-1 scoring; the
 Layer-2 headline is the research track's R3 exit. Spec §1.3/§9.3 tables updated.
 
+### D17 — M7 dev-deps `assert_cmd` + `predicates` for CLI E2E  · **Ratified for v0.1** (plan: M7, dev-only) — *spec: §10.3 (dev-deps)*
+The M7 CLI E2E slice (M7.4) drives the built `codecache` binary end-to-end (init → index → query)
+and asserts on stdout/stderr + process exit codes. `assert_cmd` (locate + run the cargo bin, capture
+output, assert exit status) and `predicates` (its `stdout`/`stderr` matcher vocabulary) are the
+idiomatic Rust pairing for this; rolling our own `std::process::Command` harness would re-invent
+exactly these matchers with less clarity. **Manager sign-off: APPROVED, dev-dependencies only** —
+they ship in no release artifact, do not touch the lean runtime dep set (§10.3 runtime list
+unchanged), and are scoped to `tests/`. Precedent: `proptest` (M0) + `criterion`/`tempfile` were
+approved on the same "test-only, keeps Cargo.toml runtime-lean" basis. Pin to current minor
+(`assert_cmd = "2"`, `predicates = "3"`); `Cargo.lock` holds exact versions for CI cache parity.
+Owner: manager (sign-off) + devops (CI parity) + test-lead (usage in `tests/cli_tests.rs`,
+`tests/e2e_cli.rs`). Recorded in `docs/plans/M7-formatter-cli.md` deviations.
+
+### D7 (re-verified at M7 entry) — line-number seam is real and fully wired  · **Confirmed 2026-06-12** — *spec: §4.1, §4.3*
+The M7 formatter plan flagged D7 ("store `start_line`/`end_line` at index time") as a seam to
+verify before slicing. **Verification result: the seam exists end-to-end; no gap, no fix needed.**
+Evidence chain: (1) `Chunk` carries `start_line`/`end_line: usize` (1-based inclusive) —
+`src/types/mod.rs:30-33`, pinned by `chunk_carries_all_documented_fields_incl_line_range_and_enrichment`.
+(2) Schema declares both as **UNINDEXED** columns — `src/storage/schema.rs:38-39` (`CREATE_SYMBOLS`);
+INSERT writes them (`queries.rs` `INSERT_CHUNK` cols 11-12) and SEARCH selects + maps them back into
+the reconstructed `Chunk` (`storage/mod.rs` `build_search_result`, `start_line/end_line` cols 10-11).
+(3) **Both** chunker paths populate real values: the AST path from Tree-sitter
+(`src/parser/mod.rs:309-310` → `start_position().row + 1` / `end_position().row + 1`), the heuristic
+path via `chunker::line_range` counting newlines (`src/chunker/mod.rs:256,300-310`). So the M7
+formatter reads stored line numbers straight off the `Chunk` in each `SearchResult` — **zero source
+file reads at format time**, honoring the §11.2 format budget (D13 `codecache_outline` at M8 reuses
+the same stored fields). Owner: manager (verification).
+
 ---
 
 ## Deferred to v0.2+ (from project_plan §9.2)

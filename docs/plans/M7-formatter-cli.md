@@ -83,10 +83,20 @@ whole pipeline is usable from the binary. **Exit (from ROADMAP):**
 - **D4 (transport-agnostic):** formatter is pure (`QueryResult` → string); CLI is one adapter,
   MCP (M8) another. No retrieval logic in CLI/formatter.
 - **D1:** `query --enable-embeddings` flag may be accepted and warn (low recall) — no logic.
-- **D13 (agent-first output ordering — replan 2026-06-11):** TOON/text order each result
-  agent-first — symbol name, qualified parent, `file:start-end`, one-line signature *before*
-  bodies; bodies only within the remaining budget (spec §8.2 ordering note). Golden outputs in
-  M7.1 must encode this ordering. M8's `codecache_outline` reuses the skeleton-line formatter.
+- **D13 (agent-first output ordering — replan 2026-06-11; format split ratified at M7.1 entry
+  2026-06-12):** The **text** format (§6.4.3) orders each result agent-first — symbol name,
+  qualified parent, `file:start-end`, one-line signature *before* the body; bodies only within the
+  remaining budget (spec §8.2). **TOON stays the compact `file:start-end`-per-line list (§6.4.1)** —
+  it is locator-only (carries no bodies), already the strongest agent-first form, and must stay
+  pipe-to-`cat`/editor friendly; making it a multi-line block would break §6.4.1 and duplicate the
+  text format. **JSON** is field-keyed, so order is not semantic. The M7.1 **text** golden encodes
+  the signature-before-body ordering. M8's `codecache_outline` reuses the text skeleton-line shape.
+  Spec §8.2 updated to record this format split.
+- **Text format = ASCII (no emoji), ratified 2026-06-12.** §6.4.3's 🔍/📊 are illustrative; the
+  golden text output is plain ASCII (`Query: "…"`, `Found N results (showing top M, T tokens)`,
+  56-char `─` rules) so goldens are byte-stable across Windows/Linux/macOS CI. One-line signature =
+  first line of `chunk_text` (split on first `\n`); qualified parent = `parent_symbol`.`symbol_name`
+  when `parent_symbol` is `Some`, else bare `symbol_name`.
 
 ## Definition of Done (this phase)
 - [ ] M7.1–M7.4 green incl. golden outputs + binary E2E.
@@ -95,10 +105,17 @@ whole pipeline is usable from the binary. **Exit (from ROADMAP):**
 - [ ] `assert_cmd`/`predicates` dev-deps signed off (deviation below).
 - [ ] clippy/fmt clean; reviewer APPROVED; `docs/TODO.md` Phase 7 + `src/{formatter,cli}/CLAUDE.md` updated.
 
-## Deviations to record (ROADMAP)
-- **D7 — store line numbers at index time.** TOON/text formats are `file:start-end` *line*
-  ranges (§6.4.1/§6.4.3) but chunks carry *byte* offsets (§4.3). Storing `start_line`/`end_line`
-  in `symbols` (UNINDEXED) at index time avoids reading source files at query time (keeps the
-  §11.2 format budget). Requires an M1 schema column + M4/M5 populating it — small, but touches
-  earlier milestones; flag at M1 if this plan is ratified before M1 ships.
-- **dev-deps:** `assert_cmd`, `predicates` for CLI E2E — beyond §10.3; manager sign-off needed.
+## Deviations to record (ROADMAP) — RESOLVED at M7 entry (2026-06-12)
+- **D7 — store line numbers at index time — VERIFIED WIRED (ROADMAP "D7 re-verified at M7 entry").**
+  The seam is real end-to-end and needs no fix: `Chunk.start_line/end_line` (`src/types/mod.rs:30-33`,
+  1-based inclusive) → UNINDEXED schema columns (`storage/schema.rs:38-39`) → INSERT
+  (`queries.rs INSERT_CHUNK` cols 11-12) → SEARCH select + `build_search_result` map-back
+  (`storage/mod.rs`). **Both** chunker paths populate real values — AST from Tree-sitter
+  `start_position().row+1`/`end_position().row+1` (`parser/mod.rs:309-310`), heuristic via
+  `chunker::line_range` (`chunker/mod.rs:256,300-310`). ⇒ M7 formatters read stored line numbers
+  off the `SearchResult.chunk`; **no file reads at format time** (honors the §11.2 budget). Manager
+  verified 2026-06-12.
+- **dev-deps `assert_cmd` + `predicates` — APPROVED (ROADMAP D17).** Dev-dependencies only (ship in
+  no release artifact, runtime §10.3 set unchanged), scoped to `tests/cli_tests.rs` + `tests/e2e_cli.rs`.
+  Pin `assert_cmd = "2"`, `predicates = "3"`; `Cargo.lock` holds exact versions for CI cache parity.
+  devops mirrors in CI. Manager sign-off 2026-06-12.

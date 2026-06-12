@@ -1,8 +1,8 @@
 //! CodeCache — a local-first, AST-driven code-context retrieval engine.
 //!
-//! Module bodies are filled milestone by milestone per [`docs/ROADMAP.md`]. As of M5, `types`,
-//! `config`, `storage`, `hasher`, `parser`, `chunker`, `indexer`, and the `app` facade are
-//! implemented; `retriever`, `formatter`, `cli`, and `mcp_server` remain stubs (M6–M8).
+//! Module bodies are filled milestone by milestone per [`docs/ROADMAP.md`]. As of M7.1, `types`,
+//! `config`, `storage`, `hasher`, `parser`, `chunker`, `indexer`, the `app` facade, `retriever`,
+//! and `formatter` are implemented; `cli` and `mcp_server` remain stubs (M7.2–M8).
 //!
 //! Module map (build order is bottom-up — see `docs/ENGINEERING_PLAN.md` §2):
 //! - [`types`]      shared, dependency-free core types (`Chunk`, `Language`, …) — Decision Log D5

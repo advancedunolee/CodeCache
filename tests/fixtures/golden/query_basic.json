@@ -1,0 +1,37 @@
+{
+  "query": "authenticate user",
+  "total_results": 5,
+  "total_tokens": 142,
+  "chunks": [
+    {
+      "symbol_name": "authenticate_user",
+      "symbol_type": "function",
+      "file_path": "src/auth/handlers.py",
+      "start_byte": 1234,
+      "end_byte": 1789,
+      "language": "python",
+      "bm25_score": -2.45,
+      "chunk_text": "def authenticate_user(username: str, password: str) -> Optional[User]:\n    \"\"\"Authenticate user with username and password.\"\"\"\n    user = get_user_by_username(username)\n    if user and verify_password(password, user.password_hash):\n        return user\n    return None"
+    },
+    {
+      "symbol_name": "verify_password",
+      "symbol_type": "method",
+      "file_path": "src/auth/handlers.py",
+      "start_byte": 1900,
+      "end_byte": 2100,
+      "language": "python",
+      "bm25_score": -1.89,
+      "chunk_text": "def verify_password(self, plain: str, hashed: str) -> bool:\n    \"\"\"Verify a plaintext password against its hash.\"\"\"\n    return bcrypt.checkpw(plain.encode(), hashed.encode())"
+    },
+    {
+      "symbol_name": "hash_password",
+      "symbol_type": "function",
+      "file_path": "src/auth/utils.py",
+      "start_byte": 300,
+      "end_byte": 460,
+      "language": "python",
+      "bm25_score": -1.20,
+      "chunk_text": "def hash_password(plain: str) -> str:\n    \"\"\"Hash a plaintext password with bcrypt.\"\"\"\n    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()"
+    }
+  ]
+}

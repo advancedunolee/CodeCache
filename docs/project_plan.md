@@ -1286,7 +1286,12 @@ The Model Context Protocol (MCP) is Anthropic's standard for connecting AI tools
 
 **Agent-first output ordering (D13).** Tool output is ordered for the *agent's* next action:
 symbol name, qualified parent, `file:start-end`, and a one-line signature first; full bodies
-only within the remaining token budget. The formatter (§6.4) realizes this ordering.
+only within the remaining token budget. The **text** formatter (§6.4.3) realizes this ordering —
+each result emits its locating header + one-line signature before its body. The **TOON** format
+(§6.4.1) stays the compact `file:start-end`-per-line list it is defined as (it carries no bodies,
+so there is nothing to order after the locator — it is already "locator-only", the strongest
+agent-first form); the **JSON** format (§6.4.2) is field-keyed, so order is not semantic. The M8
+`codecache_outline` skeleton output reuses the text formatter's signature-before-body line shape.
 
 **Self-healing search (D14).** Before answering, `codecache_search` hash-checks the files
 implicated by the top results (cheap — hashes are stored, §4.4) and transparently re-indexes

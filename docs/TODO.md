@@ -177,11 +177,16 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
   M6's only obligation: `QueryResult` chunks keep `file_path` (already true) so M8 can hash-check
   result files without new retriever API.
 
-## Phase 7 — formatter + cli (M7) · plan: [plans/M7-formatter-cli.md](plans/M7-formatter-cli.md)
-- [ ] RED tests: golden TOON/JSON/text; CLI parsing/errors; e2e init→index→query → test-lead
-- [ ] `formatter` + `cli` (clap commands) → engineering-lead
-- [ ] **D13 agent-first output ordering**: signature/skeleton lines before bodies in TOON/text
-      golden outputs (spec §8.2 ordering note) → test-lead + engineering-lead
+## Phase 7 — formatter + cli (M7) · plan: [plans/M7-formatter-cli.md](plans/M7-formatter-cli.md) · brief: [.claude/briefs/BRIEF-M7-formatter-cli.md](../.claude/briefs/BRIEF-M7-formatter-cli.md)
+- [x] **M7.1 formatters** (golden TOON/JSON/text) → DONE 2026-06-12: `Format { Toon, Json, Text }` +
+      pure `format(&QueryResult, query, fmt) -> String` (`src/formatter/{mod,toon,json,text}.rs`); 6
+      golden tests green; reviewer APPROVED (0 findings). TOON = locator-only `file:start-end` list;
+      JSON = §6.4.2 field-keyed (format-local DTO, no serde on `types::Chunk` — D4/D5); text =
+      ASCII, **D13 agent-first** (qualified parent + range + one-line signature before body). D7
+      honored (line ranges from stored `start_line`/`end_line`, zero file reads).
+- [ ] M7.2 CLI parsing + errors + exit codes (`clap` derive, §7.1–7.2 defaults) → test-lead → engineering-lead
+- [ ] M7.3 command handlers + status (delegate to app/Indexer/Retriever/Config/Storage; `serve` stub) → test-lead → engineering-lead
+- [ ] M7.4 E2E through the built binary (init→index→query, assert_cmd) → test-lead → engineering-lead
 
 ## Phase 8 — mcp_server (M8) · plan: [plans/M8-mcp-server.md](plans/M8-mcp-server.md)
 - [ ] **Entry (D15)**: spike official MCP Rust SDK `rmcp` vs hand-rolled JSON-RPC; manager

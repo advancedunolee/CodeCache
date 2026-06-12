@@ -1,0 +1,24 @@
+────────────────────────────────────────────────────────
+Query: "authenticate user"
+Found 5 results (showing top 3, 142 tokens)
+────────────────────────────────────────────────────────
+
+[1] authenticate_user (function) src/auth/handlers.py:45-67 (score: -2.45)
+def authenticate_user(username: str, password: str) -> Optional[User]:
+    """Authenticate user with username and password."""
+    user = get_user_by_username(username)
+    if user and verify_password(password, user.password_hash):
+        return user
+    return None
+
+[2] AuthService.verify_password (method) src/auth/handlers.py:70-72 (score: -1.89)
+def verify_password(self, plain: str, hashed: str) -> bool:
+    """Verify a plaintext password against its hash."""
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
+
+[3] hash_password (function) src/auth/utils.py:12-14 (score: -1.20)
+def hash_password(plain: str) -> str:
+    """Hash a plaintext password with bcrypt."""
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+
+────────────────────────────────────────────────────────
