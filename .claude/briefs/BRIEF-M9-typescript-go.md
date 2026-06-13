@@ -4,7 +4,8 @@
 - **Owner (manager):** principal-engineering-manager  ·  **Created:** 2026-06-12
 - **Status (M9.1):** RED ✅  GREEN ✅  REVIEW ✅ (APPROVE)  DONE ✅
 - **Status (M9.2):** RED ✅  GREEN ✅  REVIEW ✅ (APPROVE)  DONE ✅
-- **Status (M9.3):** RED ▢  GREEN ▢  REVIEW ▢  DONE ▢
+- **Status (M9.3):** RED ✅  GREEN ✅ (validation — passed on first run)  REVIEW ✅ (APPROVE)  DONE ✅
+- **MILESTONE M9: COMPLETE ✅** — language coverage = Python / TypeScript / Go (§1.3).
 - **Links:** docs/ROADMAP.md#m9 · docs/plans/M9-typescript-go.md · docs/TEST_STRATEGY.md#parser-python--ts--go · docs/project_plan.md §5.3
 
 ## Goal
@@ -234,6 +235,51 @@ wired in `Parser::new`. No compile errors. `cargo test --test parser_tests` (14)
 6. **D2 parity** comes for free from the shared language-agnostic `error_rate`/`should_fall_back`
    once parsing is wired; verify `high_error.go` clears the 0.20 threshold.
 7. **No interface chunks:** §5.3 lists no Go interface query — do not emit interfaces in v0.1.
+
+## RED — test lead (M9.3) — 2026-06-12 — VALIDATION CONFIRMED (PASS on first run)
+
+**Slice:** M9.3 — cross-language integration through the indexer. This is a **validation** slice:
+M5 discovery (`detect_language`) already maps `.py/.ts/.go`, and M9.1 (TS) + M9.2 (Go) wired both
+parsers. The tests prove the full pipeline (discovery → parse → chunk → store → search) handles all
+three v0.1 languages and that `config.languages` gates discovery — they were **expected** to pass on
+first run (GREEN by construction), and they did. No production code touched; no existing test changed.
+
+**Tests added** — `tests/e2e_multilang.rs` (2 tests; helpers `temp_repo`/`write_file`/
+`default_db_path`/`searchable_symbols` copied verbatim from `tests/e2e_index.rs` per the brief — no
+refactor of `e2e_index.rs`). Both drive the public `codecache::{init, index, IndexStats}` +
+`codecache::storage::Storage::search` surface only; repo built at runtime under `tempfile::TempDir`
+(no committed fixtures); all search-set asserts sort + dedup.
+
+- `index_mixed_repo_indexes_python_ts_and_go_files` — mixed repo, `init` then `index`. Asserts
+  `files_processed == 3`, `chunks_indexed == 3`, and each signature symbol searchable via a re-opened
+  DB: `authenticate_user` (Python), `handleRequest` (TS), `StartServer` (Go).
+- `language_filter_in_config_restricts_indexed_languages` — SAME repo, but after `init` overwrites
+  `.codecache/config.toml` with `languages = ["python"]` (reusing the exact default config the loader
+  wrote, changing only the `languages` array via `restrict_languages_to_python`; asserts the rewrite
+  actually differs + loads). Asserts `files_processed == 1`, `chunks_indexed == 1`, `authenticate_user`
+  searchable, and `handleRequest`/`StartServer` NOT searchable (TS/Go filtered out before parsing).
+
+**Repo shape + chunk arithmetic (pinned — one top-level symbol per file ⇒ 1 chunk per file):**
+- `auth.py` → `def authenticate_user(): return True` ⇒ **1** chunk (Python function).
+- `handler.ts` → `function handleRequest(path: string): string {...}` ⇒ **1** chunk (TS function).
+- `server.go` → `package main` + `func StartServer() string {...}` ⇒ **1** chunk (Go function; the
+  `package main` clause emits no chunk, per M9.2 `package_and_imports_handled`).
+- Mixed total = **3 files / 3 chunks**. Python-only filter = **1 file / 1 chunk**.
+
+**Result — PASS on first run (validation, not a gap):**
+- `cargo test --test e2e_multilang` → **2 passed / 0 failed**. Confirms `.py/.ts/.go` all flow
+  through the public `init→index` pipeline unchanged, and `config.languages` restricts discovery as
+  documented — no detection gap, no indexer change needed (matches the M9.3 GREEN expectation in the
+  Ordered-slices section). No `unwrap_or(Language::Python)` fallback mis-stamp surfaced.
+- `cargo test` (full suite) → **181 passed / 0 failed** (prior 179 + 2 new M9.3 tests).
+- `cargo clippy --all-targets -- -D warnings` → clean (exit 0). `cargo fmt --check` → clean (exit 0).
+
+**Constraint compliance:** only `tests/e2e_multilang.rs` added + `tests/CLAUDE.md` row added. No
+production code, no existing test, no `e2e_index.rs` touched. Deterministic + parallel-safe (TempDir
+isolation, sorted/deduped set comparisons).
+
+**Hand to:** principal-engineering-lead / manager — M9.3 validation is GREEN on first run; no GREEN
+implementation work required. Proceed to REVIEW.
 
 ## GREEN — engineering lead
 
@@ -590,5 +636,93 @@ CLAUDE.md/TODO doc updates into the slice commit (minor, process), routed to the
 - **Reviewer finding (docs hygiene):** resolved — `src/parser/CLAUDE.md` Go subsection + Files line
   + status, and `docs/TODO.md` M9.2, updated in the slice commit.
 - **TODO:** M9.2 checked off. **Slice marked DONE.**
-- **Commit:** see M9.2 commit hash below; working tree clean; 179 tests green; all four gates clean
-  on Rust 1.85.
+- **Commit:** `7f6823f434dfacea1a608cf51b7053a851c0cfca` — "M9.2: Go parser …". Working tree clean;
+  179 tests green; all four gates clean on Rust 1.85.
+
+## REVIEW — code reviewer (M9.3) — 2026-06-12 — VERDICT: APPROVE (no findings)
+
+**Scope reviewed:** the single added file `tests/e2e_multilang.rs` (validation slice; no
+production code changed). Diffed against the `tests/e2e_index.rs` template; verified the supporting
+production paths (`src/indexer/discovery.rs::detect_language`/`is_configured_language`,
+`src/config/mod.rs::Config.languages` + `rename_all = "lowercase"` on `Language`).
+
+**Gates re-run locally (Rust 1.85, this branch):**
+- `cargo fmt --check` → clean (exit 0).
+- `cargo clippy --all-targets -- -D warnings` → clean (exit 0).
+- `cargo test --test e2e_multilang` → **2 passed / 0 failed**.
+- `cargo test` (full suite) → **181 passed / 0 failed** (manually summed per-binary results:
+  29+3+10+11+5+6+4+2+6+11+15+19+5+14+7+12+1+21 = 181). Reconciles to the prior 179 + 2 new M9.3.
+
+**Test honesty + adequacy — verified (the core of this validation review):**
+- **Test 1 (`index_mixed_repo_indexes_python_ts_and_go_files`)** genuinely exercises all THREE
+  languages end-to-end through the public `init`/`index` surface (no private internals). It asserts
+  real values, not `is_ok()`: `files_processed == 3`, the pinned `chunks_indexed == 3`, and each
+  language's signature symbol searchable via a **re-opened** `Storage::search` (`authenticate_user`
+  / `handleRequest` / `StartServer`). Each search asserts exact sorted-deduped `vec![..]` equality,
+  so a cross-language false positive would fail the equality.
+- **Chunk arithmetic confirmed against the fixtures:** `build_mixed_repo` writes exactly one
+  top-level symbol per file — `auth.py` (1 Python fn), `handler.ts` (1 TS fn), `server.go`
+  (`package main` + 1 Go fn; the package clause emits no chunk per M9.2
+  `package_and_imports_handled`) ⇒ 3 files / 3 chunks. Matches the pinned assertions.
+- **Symbols are genuinely distinct:** `authenticate_user`, `handleRequest`, `StartServer` share no
+  substring, and the exact-vector equality asserts rule out a shared-substring false match.
+- **Test 2 (`language_filter_in_config_restricts_indexed_languages`)** genuinely restricts to
+  Python AND proves TS/Go exclusion: `files_processed == 1`, `chunks_indexed == 1`,
+  `authenticate_user` searchable, and `handleRequest`/`StartServer` `is_empty()` (NOT searchable).
+- **Restricted config genuinely loads:** the test reuses the exact default `config.toml` the loader
+  wrote, rewrites only the `languages` array via `restrict_languages_to_python`, and guards the
+  rewrite with `assert_ne!(restricted, default)` + `assert!(contains("\"python\"") &&
+  !contains("\"typescript\""))`. `Language`'s `rename_all = "lowercase"` confirms the array elements
+  serialize as `"python"`/`"typescript"`/`"go"`, so these string checks are correct; the rewrite
+  helper's `find("languages = [")` / `find(']')` `expect`s pass, proving the array shape held.
+- **Negative assertions are NOT vacuous / fail loudly on regression:** the very symbols the filter
+  test asserts ABSENT (`handleRequest`, `StartServer`) are proven PRESENT-when-unfiltered by Test 1
+  on the identical `build_mixed_repo` fixture. So if `config.languages` stopped gating discovery
+  (`is_configured_language` regressed), those files would be parsed and the `is_empty()` asserts
+  would fail. The discovery filter is real (`discovery.rs:62` `is_configured_language` →
+  `config.languages.contains(&lang)`), so exclusion happens before parsing as the test claims.
+
+**Hygiene:** deterministic + parallel-safe (each test owns a `tempfile::TempDir`; all search-set
+comparisons sorted + deduped; no committed fixtures; no shared mutable state). Helpers
+(`temp_repo`/`write_file`/`default_db_path`/`searchable_symbols`) are copied verbatim from
+`e2e_index.rs` per the brief's no-refactor directive — `e2e_index.rs` is untouched. No reachable
+`unwrap`/`expect`/`panic!` concern: the `expect`s are in `#[cfg(test)]` code only (acceptable). No
+production code, no existing test, no new dependency. `tests/CLAUDE.md` has the `e2e_multilang.rs`
+row (DoD doc hygiene satisfied for the test side).
+
+**Findings:** none (blocker/major/minor). The slice is correct, honest, adequate, and aligned.
+
+### M9.3 — cross-language integration (2026-06-12) — DONE ✅ · MILESTONE M9 COMPLETE
+- **Aligned:** validation slice — no production change needed. M5 discovery already routed
+  `.py/.ts/.go`; M9.1/M9.2 parsers produce the identical `Chunk` shape, so the full pipeline
+  (discovery → parse → chunk → hash → store → search) handles all three languages unchanged.
+  Reviewer APPROVE, 0 findings; tests are honest (negative assertions proven non-vacuous by Test 1).
+- **No spec deviation; no enum/dep/API change across all of M9.** The benign
+  `pipeline.rs::detect_language(..).unwrap_or(Language::Python)` fallback did not mis-stamp TS/Go
+  (their symbols are searchable and distinct) — confirmed by the mixed-repo test.
+- **TODO:** M9.3 checked off + M9 marked COMPLETE (language coverage = Python/TS/Go, §1.3).
+- **Commit:** see M9.3 commit hash below; working tree clean; **181 tests green**; all four gates
+  clean on Rust 1.85.
+
+---
+
+## MILESTONE M9 — FINAL SUMMARY (2026-06-12)
+- **Language coverage = Python / TypeScript / Go** — the §1.3 success criterion is met.
+- **Slices:** M9.1 (TS) `fa0c0705`, M9.2 (Go) `7f6823f4`, M9.3 (multilang validation) — each a
+  RED→GREEN→review→commit cycle; one commit per slice.
+- **Tests:** 166 (post-M8) → **181** (+7 TS, +5 Go, +2 multilang, +1 unit; −1 stale M3 test repointed).
+- **Architecture:** one `recognize_definition` dispatch + per-language `recognize_*` + `.scm` +
+  config; shared span/line/D2 machinery reused unchanged. `Definition.parent_override` added for
+  Go's non-lexical receiver parent (Python/TS pass `None`, behavior unchanged).
+- **Decisions:** `LANGUAGE_TYPESCRIPT` (`.tsx`/JSX deferred); `tree_sitter_go::LANGUAGE`;
+  interfaces/type-aliases (TS) and interfaces (Go) not emitted as chunks; no `SymbolType`/`Language`
+  variant; no dep change (both grammar crates already at M0; MSRV stays 1.85).
+- **Follow-ups (non-blocking, tracked in `src/parser/CLAUDE.md`):** TS destructuring-declarator
+  name guard. D3 enrichment (imports/cross_refs) for TS/Go was not re-verified in M9 — confirm at
+  M10 or file a follow-up if recall parity gaps surface.
+- **Gates:** fmt / clippy -D warnings / test --all / build all clean on Rust 1.85.
+
+**Verdict: APPROVE.** All four gates green at 181/0 on Rust 1.85; the two tests genuinely prove the
+multi-language claim and the `config.languages` filter behavior and are not vacuously passing.
+Routing back to the manager — confirm `docs/TODO.md` Phase 9 M9.3 is checked off in the slice
+commit (process/DoD, owned by the manager).

@@ -97,6 +97,7 @@ fallback and the `heuristic` chunk flag are **owned by M4** (chunker), enforced 
 **M3: GREEN (2026-06-10).** Python. **M9.1: GREEN (2026-06-12).** TypeScript
 (`function_declaration`/arrow/`class_declaration`/`method_definition`). **M9.2: GREEN (2026-06-12).**
 Go (`function_declaration`/`method_declaration`+receiver/struct → `Struct`). All three v0.1
-languages wired (§5.3). 14 Python + 7 TS + 5 Go integration tests + unit tests pass; **full suite
-179 green**; all four gates clean on Rust 1.85.0. M9.3 validates the mixed-language pipeline through
-the indexer.
+languages wired (§5.3). **M9.3 (2026-06-12):** mixed-repo + language-filter validation through the
+public `init`/`index` surface (`tests/e2e_multilang.rs`) — no indexer/detection change needed.
+**MILESTONE M9 COMPLETE: language coverage = Python/TS/Go (§1.3).** 14 Python + 7 TS + 5 Go + 2
+multilang integration tests + unit tests; **full suite 181 green**; all four gates clean on Rust 1.85.0.

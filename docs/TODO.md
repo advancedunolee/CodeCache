@@ -246,7 +246,12 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
       lines. 5 `parser_go_tests`; repointed the stale M3 `Go-unsupported` test to
       `all_v01_languages_parse_supported` + new unit test for the `UnsupportedLanguage` Display
       contract (no coverage lost). **179 tests green**, all four gates clean (Rust 1.85). Reviewer APPROVED.
-- [ ] M9.3 cross-language integration: mixed repo indexes Python/TS/Go; language filter respected.
+- [x] **M9.3 cross-language integration** (validation) — `tests/e2e_multilang.rs`: mixed Python/TS/Go
+      repo indexes through the public `init`/`index` surface (`files_processed == 3`, each signature
+      symbol searchable); `languages = ["python"]` filter restricts to Python only (TS/Go excluded
+      before parse). No indexer/detection change needed — M5 discovery already routed `.py/.ts/.go`.
+      Both tests pass on first run. **181 tests green**, all four gates clean (Rust 1.85). Reviewer APPROVED.
+- [x] **M9 COMPLETE** — language coverage = **Python / TypeScript / Go** (§1.3 success criterion).
 
 ## Phase 10 — Benchmarks + Release (M10) · plan: [plans/M10-benchmarks-release.md](plans/M10-benchmarks-release.md)
 - [ ] Full criterion suite vs systems budgets (p95<500ms, index<100MB, incr<2s, cold-index, hash) → perf

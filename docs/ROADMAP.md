@@ -72,9 +72,14 @@ A milestone is *done* only when its exit criteria are met under the Definition o
   (D14). 19 `mcp_tests` + 3 D19 `storage_tests` + 1 `e2e_cli` serve test; **166 tests green**, all four
   gates clean (Rust 1.85). Reviewer APPROVED all four slices.
 
-### M9 — TypeScript + Go parsers
+### M9 — TypeScript + Go parsers ✅ DONE (2026-06-12)
 - **Work**: add `tree-sitter-typescript` and `tree-sitter-go` configs + queries.
-- **Exit**: per-language fixture suites green; language coverage = Python/TS/Go.
+- **Exit**: per-language fixture suites green; language coverage = Python/TS/Go. **MET.**
+- **Shipped**: M9.1 TS (`fa0c0705`), M9.2 Go (`7f6823f4`), M9.3 mixed-repo validation. Per-language
+  `recognize_definition` dispatch + `.scm` (§5.3); TS function/arrow/class/method, Go
+  function/method+receiver/struct→`Struct`; D2/D7 parity; byte-exact spans. `181 tests green`, all
+  four gates clean (Rust 1.85). Decisions: `LANGUAGE_TYPESCRIPT` (`.tsx` deferred); interfaces/type
+  aliases not emitted; no enum/dep change. Brief: `.claude/briefs/BRIEF-M9-typescript-go.md`.
 
 ### M10 — Benchmarks + Release
 - **Work**: criterion suite vs all systems budgets; **Layer-1 retrieval-quality scoring**
