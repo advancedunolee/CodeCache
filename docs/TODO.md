@@ -322,10 +322,17 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
       - [x] Vendor mini-SWE-agent 2.4.1 — installed in a SHORT-path venv `C:\ccr1` (Windows long-path +
             cp1252-emoji blockers, see brief); API mapped (DefaultAgent loop / DeterministicModel /
             LocalEnvironment / `step_limit` termination).
-      - [ ] `runner.py`: per-arm DefaultAgent (tool prompt for A1, top-k inject for A4) + per-turn
-            surfaced-items capture → JSONL logger.
-      - [ ] End-to-end wiring validated offline via mini's DeterministicModel (3 logs + metrics report).
-      - [ ] (gated) live-model run — needs a model-backend decision (free/local vs a paid key; ~cents, not $1K).
+      - [x] `runner.py` (`LoggingAgent` over mini's `DefaultAgent`) + `bash_env.py` (portable `bash -c`
+            env, not cmd.exe) + `extract.py` (action→surfaced files/blocks; A1 JSON authoritative, A0
+            grep/cat heuristic) + `report.py` (pure scoring, mini-free). Per-turn surfaced items → JSONL.
+      - [x] **End-to-end offline validated via DeterministicModel** (`validate_offline.py`): A0/A1/A4 each
+            run mini's loop on `auth_q1`, log a trajectory, cover the gold block (Recall@1 file+block=1.0);
+            `runs/report.json` has per-arm Layer-1 (R/P/F1 @1/5/10 file+block) + Layer-2 (tokens +
+            tokens/turns-to-coverage). **38 pure pytest tests green** (base python; runner tests need the
+            venv). Fixed a dedup bug (repeated cross-turn gold hit inflated recall>1.0). **R1 exit met
+            offline — no arm-winner claim (that is R3).**
+      - [ ] (gated) live-model run — needs a model-backend decision (free/local via litellm vs a paid key;
+            ~cents for one task, NOT the $1K R3 spend). DeterministicModel is a drop-in swap for a real model.
 - [ ] **R2 offline ablations**: Layer-1 sweeps (chunking × ranking × enrichment) on
       ContextBench-Lite + RepoEval slice; reproduce published BM25 baselines → perf + specialist
 - [ ] **R3 agent-in-loop study**: full A0–A5 matrix on 30–50 tasks → promote winners to 100;
