@@ -701,8 +701,8 @@ row (DoD doc hygiene satisfied for the test side).
   `pipeline.rs::detect_language(..).unwrap_or(Language::Python)` fallback did not mis-stamp TS/Go
   (their symbols are searchable and distinct) — confirmed by the mixed-repo test.
 - **TODO:** M9.3 checked off + M9 marked COMPLETE (language coverage = Python/TS/Go, §1.3).
-- **Commit:** see M9.3 commit hash below; working tree clean; **181 tests green**; all four gates
-  clean on Rust 1.85.
+- **Commit:** `8c79014d2f9fda3a025165a791fda71a455628af` — "M9.3: cross-language indexing validation
+  — M9 complete …". Working tree clean; **181 tests green**; all four gates clean on Rust 1.85.
 
 ---
 
