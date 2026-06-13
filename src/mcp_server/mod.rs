@@ -11,6 +11,7 @@
 //! NEVER panics on malformed input — every bad line yields a structured error and the loop
 //! continues; clean EOF returns `Ok(())`. `tools/list` / `tools/call` / self-healing are M8.2–M8.4.
 
+mod handlers;
 mod tools;
 
 use std::io::{BufRead, Write};
@@ -33,7 +34,7 @@ const INVALID_PARAMS: i64 = -32602;
 /// The MCP server context. Holds the shared [`Storage`] (D8) so M8.2–M8.4 can lend it to
 /// `Retriever`/`Indexer` without changing this seam. The M8.1 handshake path does not read it.
 pub struct CodeCacheServer {
-    #[allow(dead_code)] // wired to Retriever/Indexer in M8.3; held now to freeze the D8 seam.
+    /// The shared connection (D8), lent onward to the `Retriever`/`Indexer` built per `tools/call`.
     storage: Storage,
 }
 
@@ -44,11 +45,13 @@ impl CodeCacheServer {
     }
 
     /// Dispatch one parsed JSON-RPC request object to its handler, returning the JSON value to
-    /// place under `result`. `Err(code, message)` maps to a JSON-RPC error object.
-    fn dispatch(&self, method: &str, params: Option<&Value>) -> Result<Value, (i64, String)> {
+    /// place under `result`. `Err(code, message)` maps to a JSON-RPC error object. Takes `&mut
+    /// self` because `tools/call codecache_update` mutates the index (M8.3).
+    fn dispatch(&mut self, method: &str, params: Option<&Value>) -> Result<Value, (i64, String)> {
         match method {
             "initialize" => self.handle_initialize(params),
             "tools/list" => Ok(self.handle_tools_list()),
+            "tools/call" => self.handle_tools_call(params),
             _ => Err((METHOD_NOT_FOUND, format!("method not found: {method}"))),
         }
     }
@@ -89,6 +92,39 @@ impl CodeCacheServer {
     fn handle_tools_list(&self) -> Value {
         json!({ "tools": tools::tool_definitions() })
     }
+
+    /// `tools/call` → execute one of the three D13 tools (M8.3). `params` must carry `name` (the
+    /// tool) and `arguments` (its input object). On success the `result` is the MCP content
+    /// envelope `{ content: [ { type:"text", text } ] }`. A missing/wrong-typed required argument
+    /// OR an unknown tool name maps to `-32602` (invalid params): per MCP the tool `name` is a
+    /// *param* of `tools/call`, so a bad name is an invalid param, not an unknown method (-32601).
+    fn handle_tools_call(&mut self, params: Option<&Value>) -> Result<Value, (i64, String)> {
+        let params = params.ok_or_else(|| {
+            (
+                INVALID_PARAMS,
+                "tools/call requires a `params` object with `name` and `arguments`".to_string(),
+            )
+        })?;
+        let name = params.get("name").and_then(Value::as_str).ok_or_else(|| {
+            (
+                INVALID_PARAMS,
+                "tools/call requires a string `name`".to_string(),
+            )
+        })?;
+        // `arguments` is optional in the envelope; an absent object behaves like `{}` so the
+        // per-tool required-argument checks produce the -32602 (not a structural error here).
+        let empty = json!({});
+        let arguments = params.get("arguments").unwrap_or(&empty);
+
+        let text = match name {
+            "codecache_search" => handlers::handle_search(&self.storage, arguments),
+            "codecache_update" => handlers::handle_update(&self.storage, arguments),
+            "codecache_outline" => handlers::handle_outline(&self.storage, arguments),
+            other => Err((INVALID_PARAMS, format!("unknown tool: {other}"))),
+        }?;
+
+        Ok(json!({ "content": [ { "type": "text", "text": text } ] }))
+    }
 }
 
 /// Transport-agnostic (D4) read → dispatch → write loop. Reads line-delimited JSON-RPC requests
@@ -99,7 +135,7 @@ impl CodeCacheServer {
 pub fn serve<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
-    server: CodeCacheServer,
+    mut server: CodeCacheServer,
 ) -> anyhow::Result<()> {
     for line in reader.lines() {
         let line = line?;
@@ -108,7 +144,7 @@ pub fn serve<R: BufRead, W: Write>(
             continue;
         }
 
-        let response = handle_line(&server, &line);
+        let response = handle_line(&mut server, &line);
         write_frame(&mut writer, &response)?;
     }
     writer.flush()?;
@@ -117,7 +153,7 @@ pub fn serve<R: BufRead, W: Write>(
 
 /// Build the JSON-RPC response value for a single (non-blank) input line. Parse failures and
 /// structurally invalid envelopes map to error objects; valid envelopes dispatch by `method`.
-fn handle_line(server: &CodeCacheServer, line: &str) -> Value {
+fn handle_line(server: &mut CodeCacheServer, line: &str) -> Value {
     let request: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(_) => return error_response(Value::Null, PARSE_ERROR, "Parse error"),

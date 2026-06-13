@@ -27,6 +27,13 @@ is cheaply `Clone`-able and the MCP server can lend one connection to `Retriever
   (drop a `files_metadata` row — symmetric with `delete_chunks_for_file`; unknown file = no-op),
   `all_indexed_files() -> Vec<PathBuf>` (enumerate every indexed path — drives the indexer's
   on-disk-vs-known reconcile and the DB-wide totals recompute).
+- **M8.3 addition** (**D19**, plan §3.2.2): `symbols_for_path(&Path) -> Vec<SymbolOutline>` — the
+  `codecache_outline` lookup. A plain parameterized column `SELECT` off the contentful `symbols`
+  table `WHERE file_path = ?1 OR file_path LIKE ?2 ESCAPE '\'` (exact file OR `<dir>/%` directory
+  prefix; the path's literal `%`/`_`/`\` are escaped by the private `escape_like` helper so a path
+  with a wildcard char never over-matches), ordered `(file_path, start_line, end_line)`. Returns the
+  slim `SymbolOutline` (name/type/parent/path/start_line/end_line) — **zero source reads** (D7), no
+  `chunk_text`. Unknown path → empty `Vec`; corrupt `symbol_type` → `CorruptRow`, never a panic.
 - `SearchResult { chunk, bm25_score }`. `StorageError::{Sqlite, LockPoisoned, CorruptRow}` (typed,
   impl `std::error::Error`; no reachable panic — poisoned lock & unknown stored enum are typed).
 

@@ -752,3 +752,402 @@ fn tools_list_tool_order_is_stable_and_deterministic() {
         "tool order must be identical across two tools/list calls (determinism)"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// M8.3 — `tools/call` round-trip: search / update / outline (RED).
+//
+// A `tools/call` request is `{ jsonrpc, id, method:"tools/call", params:{ name, arguments } }`.
+// On success the `result` carries the MCP content envelope `{ content: [ { type:"text",
+// text:"<...>" } ] }` (project_plan §8.2 example responses). Bad arguments (missing required arg,
+// wrong type) AND an unknown tool name → JSON-RPC error `-32602` (invalid params).
+//
+// PINNED M8.3 DECISIONS (the eng-lead must honor — the tests are the contract):
+//   1. Response envelope on success: `result.content` is a non-empty ARRAY whose first element is
+//      `{ "type":"text", "text":<string> }`. The text payload is what the agent consumes.
+//   2. `codecache_search` text REUSES the §6.4.3 text formatter (D13 agent-first): it carries the
+//      `Query: "<q>"` header, a `Found N results` line, and a `[n] <symbol> (<type>) file:s-e`
+//      locator block per hit. The tests assert on STABLE SUBSTRINGS (seeded symbol name, the
+//      `file:start-end` locator, the `Query:`/`Found` header lines) — not full-string equality —
+//      so the eng-lead keeps latitude on exact wording while the agent-first shape is pinned.
+//   3. `codecache_update` text reports stats mirroring §8.3: it MUST contain the count of files
+//      processed and chunks indexed (substring `"1 file"` and `"chunk"`). The update test writes a
+//      REAL file on disk and indexes it first (the server's Indexer re-indexes from disk).
+//   4. `codecache_outline` text is a symbol SKELETON reusing the D13 text skeleton-line shape: one
+//      line per symbol carrying the symbol name and its `file:start-end` range. A FILE path lists
+//      that file's symbols; a DIRECTORY path lists every file's symbols under it.
+//   5. ERROR MAPPING — pinned: a `tools/call` with a missing/wrong-typed required argument → `-32602`
+//      (invalid params). An UNKNOWN TOOL NAME in `tools/call` → ALSO `-32602` (NOT `-32601`): per the
+//      MCP convention the tool `name` is a *param* of the `tools/call` method, so a bad name is an
+//      invalid param, not a missing JSON-RPC method. (`-32601` stays reserved for an unknown
+//      top-level JSON-RPC `method`, e.g. M8.1's `unknown_method_returns_method_not_found`.)
+//
+// These tests fail now because `tools/call` is unhandled — `dispatch`'s default arm returns
+// `-32601 method not found: tools/call`. The GREEN target: a `"tools/call"` dispatch arm that
+// routes `params.name` to per-tool handlers, with `CodeCacheServer` now holding/lazily building a
+// `Retriever` + `Indexer` over its shared `Storage` (D8).
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+use std::path::PathBuf;
+
+use codecache::types::{Chunk, Language, SymbolType};
+
+// ── M8.3 harness: seeding + tools/call drivers ───────────────────────────────────────────────
+
+/// Build a `Chunk` for direct seeding (mirrors `tests/retriever_tests.rs`). `start_byte`/`end_byte`
+/// are derived from `body` so dedup never collapses distinct symbols; line range is explicit so the
+/// outline locator (`file:start-end`) is predictable.
+#[allow(clippy::too_many_arguments)]
+fn seed_chunk(
+    file: &str,
+    name: &str,
+    symbol_type: SymbolType,
+    parent: Option<&str>,
+    body: &str,
+    start_line: usize,
+    end_line: usize,
+) -> Chunk {
+    Chunk {
+        symbol_name: name.to_string(),
+        symbol_type,
+        file_path: PathBuf::from(file),
+        start_byte: 0,
+        end_byte: body.len(),
+        start_line,
+        end_line,
+        chunk_text: body.to_string(),
+        language: Language::Python,
+        parent_symbol: parent.map(str::to_string),
+        file_docstring: None,
+        imports: Vec::new(),
+        cross_references: Vec::new(),
+        is_heuristic: false,
+    }
+}
+
+/// Build a `CodeCacheServer` over a temp DB seeded with `chunks` (via `Storage::insert_chunks`),
+/// returning the server + the live temp dir (keep it alive for the test). Unlike `test_server`
+/// (empty DB), this lets the M8.3 search/outline round-trips actually retrieve something.
+fn test_server_seeded(chunks: &[Chunk]) -> (CodeCacheServer, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let db_path = tmp.path().join("index.db");
+    let storage = Storage::new(&db_path).expect("open storage");
+    storage.init_schema().expect("init schema");
+    storage.insert_chunks(chunks).expect("seed chunks");
+    (CodeCacheServer::new(storage), tmp)
+}
+
+/// A `tools/call` request line (newline-framed) naming `tool` with the given `arguments` object.
+fn tools_call_request_line(id: i64, tool: &str, arguments: serde_json::Value) -> String {
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments }
+    });
+    format!(
+        "{}\n",
+        serde_json::to_string(&req).expect("serialize request")
+    )
+}
+
+/// Drive `server` with a single `tools/call` request and return the parsed response value.
+fn tools_call(
+    server: CodeCacheServer,
+    id: i64,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let input = tools_call_request_line(id, tool, arguments);
+    let reader = Cursor::new(input.into_bytes());
+    let mut output: Vec<u8> = Vec::new();
+    serve(reader, &mut output, server).expect("serve loop returns Ok at clean EOF");
+    single_response(&output)
+}
+
+/// Assert the success envelope shape and return the `result.content[0].text` payload string. Pins
+/// `result.content` = non-empty array whose first element is `{ type:"text", text:<string> }`.
+fn call_result_text(resp: &serde_json::Value) -> String {
+    assert_eq!(
+        resp.get("jsonrpc").and_then(|v| v.as_str()),
+        Some("2.0"),
+        "tools/call response must carry jsonrpc \"2.0\"; got: {resp}"
+    );
+    assert!(
+        resp.get("error").is_none(),
+        "a successful tools/call must NOT carry an error; got: {resp}"
+    );
+    let result = resp
+        .get("result")
+        .expect("successful tools/call must carry a `result`");
+    let content = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("result.content must be an array; got: {result}"));
+    assert!(
+        !content.is_empty(),
+        "result.content must be non-empty; got: {result}"
+    );
+    let first = &content[0];
+    assert_eq!(
+        first.get("type").and_then(|v| v.as_str()),
+        Some("text"),
+        "result.content[0].type must be \"text\"; got: {first}"
+    );
+    first
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("result.content[0].text must be a string; got: {first}"))
+        .to_string()
+}
+
+/// Assert the response is a JSON-RPC error with `code`, echoing `id`.
+fn assert_error_code(resp: &serde_json::Value, expected_code: i64, expected_id: i64) {
+    assert_eq!(
+        resp.get("jsonrpc").and_then(|v| v.as_str()),
+        Some("2.0"),
+        "error response must carry jsonrpc \"2.0\"; got: {resp}"
+    );
+    assert_eq!(
+        resp.get("id").and_then(|v| v.as_i64()),
+        Some(expected_id),
+        "error response must echo the request id; got: {resp}"
+    );
+    let error = resp
+        .get("error")
+        .unwrap_or_else(|| panic!("expected a JSON-RPC error object; got: {resp}"));
+    assert_eq!(
+        error.get("code").and_then(|v| v.as_i64()),
+        Some(expected_code),
+        "error code must be {expected_code}; got: {error}"
+    );
+    assert!(
+        error.get("message").and_then(|v| v.as_str()).is_some(),
+        "JSON-RPC error must carry a `message` string; got: {error}"
+    );
+}
+
+// ── 12. codecache_search round-trip → §6.4.3 agent-first text ────────────────────────────────
+
+/// `tools/call codecache_search {query}` over a seeded index returns the success envelope
+/// `result.content[0]{type:"text", text}`; the text reflects the §6.4.3 formatter — it names the
+/// seeded symbol, carries the `file:start-end` locator, and the agent-first header (`Query:` echo +
+/// `Found` count). Asserts on stable substrings, not full-string equality.
+#[test]
+fn call_codecache_search_returns_formatted_results() {
+    let (server, _tmp) = test_server_seeded(&[
+        seed_chunk(
+            "src/auth.py",
+            "authenticate_user",
+            SymbolType::Function,
+            None,
+            "def authenticate_user(username, password):\n    return verify(username, password)",
+            45,
+            67,
+        ),
+        seed_chunk(
+            "src/math.py",
+            "compute_factorial",
+            SymbolType::Function,
+            None,
+            "def compute_factorial(n):\n    return product(range(1, n + 1))",
+            1,
+            5,
+        ),
+    ]);
+
+    let resp = tools_call(
+        server,
+        12,
+        "codecache_search",
+        serde_json::json!({ "query": "authenticate user" }),
+    );
+    assert_eq!(
+        resp.get("id").and_then(|v| v.as_i64()),
+        Some(12),
+        "search response must echo the request id; got: {resp}"
+    );
+
+    let text = call_result_text(&resp);
+    assert!(
+        text.contains("authenticate_user"),
+        "search text must name the seeded matching symbol; got: {text:?}"
+    );
+    assert!(
+        text.contains("src/auth.py:45-67"),
+        "search text must carry the agent-first file:start-end locator; got: {text:?}"
+    );
+    // Agent-first header (§6.4.3): query echo + a result count line precede the bodies.
+    assert!(
+        text.contains("Query:") && text.contains("authenticate user"),
+        "search text must echo the query in its header; got: {text:?}"
+    );
+    assert!(
+        text.contains("Found"),
+        "search text must carry the `Found N results` header line; got: {text:?}"
+    );
+}
+
+// ── 13. codecache_update round-trip → re-index + stats ───────────────────────────────────────
+
+/// `tools/call codecache_update {files}` re-indexes a REAL on-disk file and returns a text result
+/// reporting the stats (§8.3 "Updated N files, indexed M chunks"). The file is created and indexed
+/// first so the server's Indexer has a project root + DB to update; the update then re-indexes it.
+#[test]
+fn call_codecache_update_reindexes_and_reports_stats() {
+    // Build a real, initialized + indexed project on disk; the server points at its DB.
+    let tmp = tempfile::tempdir().expect("temp project dir");
+    let root = tmp.path();
+    codecache::init(root).expect("init project");
+    let rel = "mod.py";
+    std::fs::write(
+        root.join(rel),
+        "def alpha():\n    return 1\n\ndef beta():\n    return 2\n",
+    )
+    .expect("write source file");
+    codecache::index(root).expect("initial index");
+
+    // The server runs over the same on-disk DB so its Indexer re-indexes from the project root.
+    let db_path = root.join(".codecache").join("index.db");
+    let storage = Storage::new(&db_path).expect("open indexed db");
+    let server = CodeCacheServer::new(storage);
+
+    let abs = root.join(rel);
+    let resp = tools_call(
+        server,
+        13,
+        "codecache_update",
+        serde_json::json!({ "files": [abs.to_string_lossy()] }),
+    );
+    assert_eq!(
+        resp.get("id").and_then(|v| v.as_i64()),
+        Some(13),
+        "update response must echo the request id; got: {resp}"
+    );
+
+    let text = call_result_text(&resp);
+    // §8.3: "Updated {files_processed} files, indexed {chunks_indexed} chunks ...". The single
+    // updated file and its chunk count must be reported. Assert on stable substrings.
+    assert!(
+        text.contains("1 file"),
+        "update text must report one file processed; got: {text:?}"
+    );
+    assert!(
+        text.contains("chunk"),
+        "update text must report the chunk count; got: {text:?}"
+    );
+}
+
+// ── 14. codecache_outline round-trip → symbol skeleton (file + directory) ────────────────────
+
+/// `tools/call codecache_outline {path}` returns a symbol skeleton: one line per symbol carrying
+/// the symbol name and its `file:start-end` range (D13 skeleton-line shape). A FILE path lists that
+/// file's symbols; a DIRECTORY path lists symbols across every file under it.
+#[test]
+fn call_codecache_outline_returns_symbol_skeleton() {
+    let chunks = [
+        seed_chunk(
+            "src/a.py",
+            "Greeter",
+            SymbolType::Class,
+            None,
+            "class Greeter:\n    ...",
+            1,
+            20,
+        ),
+        seed_chunk(
+            "src/a.py",
+            "greet",
+            SymbolType::Method,
+            Some("Greeter"),
+            "def greet(self):\n    ...",
+            5,
+            12,
+        ),
+        seed_chunk(
+            "src/sub/b.py",
+            "helper",
+            SymbolType::Function,
+            None,
+            "def helper():\n    ...",
+            1,
+            4,
+        ),
+    ];
+
+    // (a) A FILE path lists exactly that file's symbols with their ranges.
+    let (server, _tmp) = test_server_seeded(&chunks);
+    let resp = tools_call(
+        server,
+        14,
+        "codecache_outline",
+        serde_json::json!({ "path": "src/a.py" }),
+    );
+    let text = call_result_text(&resp);
+    assert!(
+        text.contains("Greeter"),
+        "outline must list the class symbol; got: {text:?}"
+    );
+    assert!(
+        text.contains("greet"),
+        "outline must list the method symbol; got: {text:?}"
+    );
+    assert!(
+        text.contains("src/a.py:1-20"),
+        "outline lines carry the symbol's file:start-end range; got: {text:?}"
+    );
+    assert!(
+        !text.contains("src/sub/b.py"),
+        "a FILE outline must not include symbols from another file; got: {text:?}"
+    );
+
+    // (b) A DIRECTORY path lists symbols across every file under it.
+    let (server_dir, _tmp_dir) = test_server_seeded(&chunks);
+    let resp_dir = tools_call(
+        server_dir,
+        15,
+        "codecache_outline",
+        serde_json::json!({ "path": "src" }),
+    );
+    let text_dir = call_result_text(&resp_dir);
+    assert!(
+        text_dir.contains("Greeter") && text_dir.contains("helper"),
+        "a DIRECTORY outline must span every file under it; got: {text_dir:?}"
+    );
+    assert!(
+        text_dir.contains("src/a.py:1-20") && text_dir.contains("src/sub/b.py:1-4"),
+        "a DIRECTORY outline carries each symbol's file:start-end range; got: {text_dir:?}"
+    );
+}
+
+// ── 15. bad arguments / unknown tool → invalid params (-32602) ───────────────────────────────
+
+/// A `tools/call` with a missing required argument, or naming an unknown tool, maps to `-32602`
+/// (invalid params), echoing the request id. Pins decision #5: an unknown tool NAME is an invalid
+/// *param* of `tools/call` (-32602), NOT an unknown JSON-RPC method (-32601).
+#[test]
+fn call_with_bad_arguments_returns_invalid_params() {
+    // (a) codecache_search with no `query` (required) → -32602.
+    let (server, _tmp) = test_server_seeded(&[]);
+    let resp = tools_call(server, 20, "codecache_search", serde_json::json!({}));
+    assert_error_code(&resp, -32602, 20);
+
+    // (b) codecache_outline with no `path` (required) → -32602.
+    let (server, _tmp) = test_server_seeded(&[]);
+    let resp = tools_call(server, 21, "codecache_outline", serde_json::json!({}));
+    assert_error_code(&resp, -32602, 21);
+
+    // (c) codecache_update with no `files` (required) → -32602.
+    let (server, _tmp) = test_server_seeded(&[]);
+    let resp = tools_call(server, 22, "codecache_update", serde_json::json!({}));
+    assert_error_code(&resp, -32602, 22);
+
+    // (d) an UNKNOWN tool name → -32602 (invalid param `name`), NOT -32601.
+    let (server, _tmp) = test_server_seeded(&[]);
+    let resp = tools_call(
+        server,
+        23,
+        "codecache_not_a_real_tool",
+        serde_json::json!({ "query": "x" }),
+    );
+    assert_error_code(&resp, -32602, 23);
+}

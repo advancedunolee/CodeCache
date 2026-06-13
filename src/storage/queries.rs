@@ -41,6 +41,19 @@ WHERE symbols MATCH ?1
 ORDER BY score ASC, rowid ASC
 LIMIT ?2;";
 
+/// Path-scoped symbol skeleton for the `codecache_outline` tool (Decision Log **D19**). A plain
+/// column `SELECT` over the contentful `symbols` FTS5 table reading the UNINDEXED line columns
+/// (zero source reads — D7). Returns the symbols of an EXACT file (`file_path = ?1`) OR every
+/// symbol under a directory prefix (`file_path LIKE ?2`, where `?2 = "<dir>/%"`). `?2`'s path
+/// portion has its SQL `LIKE` wildcards (`%`, `_`) and the escape char (`\`) escaped via
+/// `ESCAPE '\'`, so a sibling file that merely shares the prefix string never over-matches.
+/// Ordered deterministically by `(file_path, start_line, end_line)` ascending.
+pub const SYMBOLS_FOR_PATH: &str = "\
+SELECT symbol_name, symbol_type, parent_symbol, file_path, start_line, end_line
+FROM symbols
+WHERE file_path = ?1 OR file_path LIKE ?2 ESCAPE '\\'
+ORDER BY file_path, start_line, end_line;";
+
 /// Read a single file's stored content hash.
 pub const GET_FILE_HASH: &str = "SELECT content_hash FROM files_metadata WHERE file_path = ?1;";
 

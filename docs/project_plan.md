@@ -356,6 +356,13 @@ impl Storage {
 
     // Full-text search with BM25 ranking
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
+
+    // Path-scoped symbol skeleton for the `codecache_outline` tool (Decision Log D19, M8.3).
+    // Reads the skeleton columns (symbol_name, symbol_type, parent_symbol, file_path, start_line,
+    // end_line) straight off the contentful `symbols` FTS5 table for an exact file OR a directory
+    // prefix (<dir>/%), ordered by (file_path, start_line, end_line). Zero source reads (D7/D13);
+    // returns slim SymbolOutline rows, not full Chunks. Additive — no change to `search`/schema.
+    pub fn symbols_for_path(&self, path: &Path) -> Result<Vec<SymbolOutline>>;
     
     // Metadata operations
     pub fn get_file_hash(&self, file_path: &Path) -> Result<Option<String>>;
@@ -377,6 +384,17 @@ pub struct FileMeta {
 pub struct SearchResult {
     pub chunk: Chunk,
     pub bm25_score: f64,
+}
+
+// Decision Log D19: the slim per-symbol projection backing `codecache_outline` (M8.3). Only the
+// fields the skeleton needs — no chunk_text/imports — so the outline stays within the §11.2 budget.
+pub struct SymbolOutline {
+    pub symbol_name: String,
+    pub symbol_type: SymbolType,
+    pub parent_symbol: Option<String>,
+    pub file_path: PathBuf,
+    pub start_line: usize,   // 1-based inclusive (D7)
+    pub end_line: usize,
 }
 ```
 
@@ -1428,7 +1446,11 @@ any that changed, so results are correct-by-construction and never stale.
 
 Outline rows come straight from the index (`symbols`: symbol name, type, `parent_symbol`,
 `start_line`/`end_line` — D7), so no source files are read at query time. This is the
-repo-map primitive aider validated; for CodeCache it is one indexed lookup.
+repo-map primitive aider validated; for CodeCache it is one indexed lookup —
+`Storage::symbols_for_path` (Decision Log **D19**), a path-scoped column `SELECT` over the
+contentful `symbols` table for an exact file OR a directory prefix (`<dir>/%`), ordered by
+`(file_path, start_line, end_line)`. The handler formats the returned `SymbolOutline` rows via the
+§6.4.3 text skeleton-line shape (signature/locator before bodies — D13).
 
 ### 8.3 MCP Server Pseudocode
 

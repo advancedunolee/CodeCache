@@ -50,8 +50,23 @@ copies of **§8.2 verbatim** (D13): search `{query(req), max_tokens=4000, file_f
 update `{files[](req)}`, outline `{path(req), max_tokens=2000}`. `default` values are JSON values
 of each property's own type (numbers / null). `tools/list` accepts absent `params` (not -32602).
 
+## Shipped API (M8.3 — tools/call round-trip)
+`tools/call` → parses `params.name` + `params.arguments`, routes to the three handlers in
+`src/mcp_server/handlers.rs`, and returns `result { content: [ { type:"text", text } ] }`:
+- `codecache_search` → `Retriever::query` (`query` req, `max_tokens`=4000, `file_filter` opt) →
+  M7 `formatter::format(.., Format::Text)` (agent-first, D13).
+- `codecache_update` → force re-index of the named `files` (delete each `files_metadata` row via
+  `Storage::delete_file_meta`, then `Indexer::update_files`) → stats text. This is the MCP
+  "re-index these now" semantic; it does not change `update_files`' own idempotency.
+- `codecache_outline` → `Storage::symbols_for_path` (D19) → `SymbolOutline` skeleton lines (D13).
+Error mapping: unknown tool name / missing or mistyped required arg → `-32602`; handler-internal
+failure (retrieval/index/storage error) → `-32603`. `CodeCacheServer` now holds `Retriever` +
+`Indexer` over its shared `Storage` (D8); the `serve` loop dispatches `&mut self` so `update` can
+mutate the index. No reachable `unwrap/expect/panic`.
+
 ## Status
 M0: empty stub. **M8.1 DONE (2026-06-12):** JSON-RPC framing + `initialize` handshake + error
 mapping; `serve` stub replaced (stdio wired; SSE → clean unsupported error, D4); all four gates green.
-**M8.2 DONE (2026-06-12):** `tools/list` with all three D13 tool schemas (`tools.rs`); reviewer
-APPROVED (schemas match §8.2 char-for-char); 154 tests green (Rust 1.85). M8.3–M8.4 pending.
+**M8.2 DONE (2026-06-12):** `tools/list` with all three D13 tool schemas (`tools.rs`); schemas match
+§8.2 char-for-char. **M8.3 DONE (2026-06-12):** `tools/call` round-trip (search/update/outline) +
+`handlers.rs` + D19 `symbols_for_path`; reviewer APPROVED; 162 tests green (Rust 1.85). M8.4 pending.

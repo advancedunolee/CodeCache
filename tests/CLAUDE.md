@@ -15,11 +15,12 @@ directory holds the wider integration/E2E/property surface.
 | `parser_tests.rs` | M3 parser integration: exact byte spans, method/decorator/nested, ERROR-rate (D2). | M3 |
 | `chunker_tests.rs` | M4 chunker integration: AST→Chunk, D3 enrichment, D2 heuristic fallback flag. | M4 |
 | `chunker_proptest.rs` | M4 property: spans in-bounds; chunks disjoint-or-nested; child contained in parent. | M4 |
+| `storage_tests.rs` | M1 storage integration: schema idempotency, chunk round-trip CRUD, BM25/MATCH ordering, empty-DB/error paths. + M8.3 D19 `symbols_for_path` (exact-file / directory-prefix / unknown-path ordering). | M1/M8 |
 | `retriever_tests.rs` | M6 retriever integration: BM25 ranking determinism, dedup, token budget. | M6 |
 | `formatter_tests.rs` | M7.1 formatter golden outputs: TOON/JSON/text + JSON round-trip + D13 text ordering (goldens in `fixtures/golden/`). | M7 |
 | `cli_tests.rs` | M7.2/M7.3 CLI: clap parsing/defaults/exit-codes + handler behavior (init/index/update/query/status/config; serve stub) via `assert_cmd`. | M7 |
 | `e2e_cli.rs` | M7.4 full E2E through the built binary: init→index→query happy path + JSON parse + failure-path nonzero/exit-code on a copied fixture repo. + M8.1 `serve --transport sse` → clean unsupported error. | M7/M8 |
-| `mcp_tests.rs` | M8.1 MCP server: JSON-RPC framing + `initialize` handshake + error codes (-32700/-32601/-32602) + no-panic recovery. M8.2 `tools/list`: all three D13 tools with exact §8.2 inputSchemas + stable tool order. Over an in-memory reader/writer seam (no real stdio). | M8 |
+| `mcp_tests.rs` | M8.1 MCP server: JSON-RPC framing + `initialize` handshake + error codes (-32700/-32601/-32602) + no-panic recovery. M8.2 `tools/list`: all three D13 tools with exact §8.2 inputSchemas + stable tool order. M8.3 `tools/call`: search/update/outline round-trips + bad-args → -32602. Over an in-memory reader/writer seam (no real stdio). | M8 |
 | `fixtures/golden/` | Committed golden formatter outputs (`query_{basic,empty}.{toon,json,txt}`) compared CRLF→LF-normalized. | M7 |
 | `fixtures/` | Sample source trees / files used by integration + E2E tests (added as needed). | M3+ |
 

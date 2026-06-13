@@ -9,6 +9,39 @@ use std::path::{Path, PathBuf};
 use codecache::storage::Storage;
 use codecache::types::{Chunk, FileMeta, Language, SymbolType};
 
+// ───────────────────────── M8.3 / D19 — `symbols_for_path` skeleton helpers ─────────────────────────
+
+/// Build a `Chunk` with a controlled file/symbol/type/parent and an explicit 1-based inclusive
+/// line range, so the D19 `symbols_for_path` ordering + projection can be asserted exactly. The
+/// `chunk_text` is irrelevant to the skeleton (D19 returns no body) but must be non-empty so the
+/// row inserts cleanly.
+#[allow(clippy::too_many_arguments)]
+fn outline_chunk(
+    file: &str,
+    name: &str,
+    symbol_type: SymbolType,
+    parent: Option<&str>,
+    start_line: usize,
+    end_line: usize,
+) -> Chunk {
+    Chunk {
+        symbol_name: name.to_string(),
+        symbol_type,
+        file_path: PathBuf::from(file),
+        start_byte: 0,
+        end_byte: 1,
+        start_line,
+        end_line,
+        chunk_text: format!("def {name}(): pass"),
+        language: Language::Python,
+        parent_symbol: parent.map(str::to_string),
+        file_docstring: None,
+        imports: Vec::new(),
+        cross_references: Vec::new(),
+        is_heuristic: false,
+    }
+}
+
 /// Build a `Storage` over a fresh temp DB with the schema initialized.
 /// Returns (dir, storage); keep `dir` alive for the test's duration.
 fn fresh_storage() -> (tempfile::TempDir, Storage) {
@@ -433,4 +466,162 @@ fn same_inserts_expect_deterministic_ordering() {
     let (_d1, first) = build();
     let (_d2, second) = build();
     assert_eq!(first, second, "identical inserts ⇒ identical ordering");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// M8.3 — D19: `Storage::symbols_for_path(&Path) -> Result<Vec<SymbolOutline>>` (RED).
+//
+// The D19 contract (ROADMAP D19 + project_plan §3.2.2 / §8.2 Tool 3): a path-scoped, read-only
+// column SELECT over the contentful `symbols` FTS5 table returning the SLIM skeleton projection
+//   SymbolOutline { symbol_name, symbol_type, parent_symbol, file_path, start_line, end_line }
+// (NOT a full Chunk — no chunk_text/imports/etc.), for an EXACT file path OR a directory prefix
+// (`<dir>/%`), ordered deterministically by `(file_path, start_line, end_line)`. Zero source reads
+// (D7): the line columns come straight off the stored UNINDEXED columns.
+//
+// These tests fail to COMPILE now — neither `Storage::symbols_for_path` nor `types::SymbolOutline`
+// exists. That compile error is the RED state; it is the GREEN target for the eng-lead.
+//
+// PINNED DECISIONS (the eng-lead must honor — the tests are the contract):
+//   - Signature: `pub fn symbols_for_path(&self, path: &Path) -> storage::Result<Vec<SymbolOutline>>`.
+//   - `SymbolOutline` lives in `codecache::types` with the six fields above; `symbol_type` is the
+//     typed `SymbolType` enum (not a string); `parent_symbol` is `Option<String>`; lines are
+//     1-based inclusive `usize` (D7). Derives at least `Debug` + `Clone` + `PartialEq` + `Eq`.
+//   - Path semantics: a query path that EXACTLY equals a stored `file_path` returns that file's
+//     symbols; a query path that is a DIRECTORY returns every symbol whose `file_path` is under it
+//     (prefix `<dir>/%`), but NOT a sibling file that merely shares the prefix string. Unknown
+//     path ⇒ empty `Vec`, never an error.
+//   - Ordering: `(file_path, start_line, end_line)` ascending — stable + deterministic.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/// Seed three files' worth of symbols and return the storage handle. Layout:
+///   src/a.py        → b_func(10-12), a_class(1-8), a_method(3-7)   [unsorted on insert]
+///   src/sub/b.py    → b_top(1-4)
+///   other.py        → other_fn(1-2)
+/// The deliberately out-of-order insert for `src/a.py` lets the ordering assertion prove
+/// `symbols_for_path` sorts by `(file_path, start_line, end_line)` rather than echoing insert order.
+fn seed_outline_storage() -> (tempfile::TempDir, Storage) {
+    let (dir, storage) = fresh_storage();
+    storage
+        .insert_chunks(&[
+            outline_chunk("src/a.py", "b_func", SymbolType::Function, None, 10, 12),
+            outline_chunk("src/a.py", "a_class", SymbolType::Class, None, 1, 8),
+            outline_chunk(
+                "src/a.py",
+                "a_method",
+                SymbolType::Method,
+                Some("a_class"),
+                3,
+                7,
+            ),
+            outline_chunk("src/sub/b.py", "b_top", SymbolType::Function, None, 1, 4),
+            outline_chunk("other.py", "other_fn", SymbolType::Function, None, 1, 2),
+        ])
+        .expect("seed outline chunks");
+    (dir, storage)
+}
+
+#[test]
+fn symbols_for_path_exact_file_returns_its_symbols_ordered() {
+    // An exact file path returns ONLY that file's symbols, ordered by (start_line, end_line).
+    let (_dir, storage) = seed_outline_storage();
+
+    let rows = storage
+        .symbols_for_path(Path::new("src/a.py"))
+        .expect("symbols_for_path on an exact file");
+
+    // Only src/a.py's three symbols (not src/sub/b.py, not other.py).
+    let names: Vec<&str> = rows.iter().map(|s| s.symbol_name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["a_class", "a_method", "b_func"],
+        "exact-file outline returns that file's symbols ordered by start_line (1,3,10)"
+    );
+
+    // Every row is scoped to the queried file.
+    for row in &rows {
+        assert_eq!(
+            row.file_path,
+            PathBuf::from("src/a.py"),
+            "exact-file outline rows all belong to the queried file"
+        );
+    }
+
+    // The slim projection round-trips type, parent, and the D7 1-based inclusive line range.
+    let a_class = &rows[0];
+    assert_eq!(
+        a_class.symbol_type,
+        SymbolType::Class,
+        "symbol_type is typed"
+    );
+    assert_eq!(a_class.parent_symbol, None, "top-level class has no parent");
+    assert_eq!((a_class.start_line, a_class.end_line), (1, 8), "D7 lines");
+
+    let a_method = &rows[1];
+    assert_eq!(a_method.symbol_type, SymbolType::Method);
+    assert_eq!(
+        a_method.parent_symbol.as_deref(),
+        Some("a_class"),
+        "parent_symbol is projected for nested symbols"
+    );
+    assert_eq!((a_method.start_line, a_method.end_line), (3, 7));
+}
+
+#[test]
+fn symbols_for_path_directory_prefix_returns_all_under_it() {
+    // A directory path returns every symbol whose file is under it (src/a.py + src/sub/b.py),
+    // ordered by (file_path, start_line, end_line); a sibling outside the dir (other.py) is excluded.
+    let (_dir, storage) = seed_outline_storage();
+
+    let rows = storage
+        .symbols_for_path(Path::new("src"))
+        .expect("symbols_for_path on a directory");
+
+    // file_path set is exactly the two files under src/ — other.py is NOT included.
+    let mut files: Vec<String> = rows
+        .iter()
+        .map(|s| s.file_path.to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    files.dedup();
+    assert_eq!(
+        files,
+        vec!["src/a.py".to_string(), "src/sub/b.py".to_string()],
+        "directory outline spans every file under the prefix, excluding siblings (other.py)"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|s| s.file_path == PathBuf::from("other.py")),
+        "a sibling file outside the queried directory must not appear"
+    );
+
+    // Ordered by (file_path, start_line): src/a.py(1,3,10) then src/sub/b.py(1).
+    let ordered: Vec<(String, usize)> = rows
+        .iter()
+        .map(|s| (s.file_path.to_string_lossy().into_owned(), s.start_line))
+        .collect();
+    assert_eq!(
+        ordered,
+        vec![
+            ("src/a.py".to_string(), 1),
+            ("src/a.py".to_string(), 3),
+            ("src/a.py".to_string(), 10),
+            ("src/sub/b.py".to_string(), 1),
+        ],
+        "directory outline ordered by (file_path, start_line, end_line)"
+    );
+}
+
+#[test]
+fn symbols_for_path_unknown_path_returns_empty() {
+    // A path that matches no stored file (neither exact nor prefix) yields an empty Vec, not an error.
+    let (_dir, storage) = seed_outline_storage();
+
+    let rows = storage
+        .symbols_for_path(Path::new("does/not/exist"))
+        .expect("unknown path is a well-formed empty result, not an error");
+    assert!(
+        rows.is_empty(),
+        "unknown path ⇒ empty Vec (well-formed), got {rows:?}"
+    );
 }

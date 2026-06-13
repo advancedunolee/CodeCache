@@ -321,6 +321,26 @@ formatter reads stored line numbers straight off the `Chunk` in each `SearchResu
 file reads at format time**, honoring the §11.2 format budget (D13 `codecache_outline` at M8 reuses
 the same stored fields). Owner: manager (verification).
 
+### D19 — additive `Storage::symbols_for_path` for the `codecache_outline` tool  · **Ratified for v0.1** (plan: M8.3) — *spec: §3.2.2, §8.2 (Tool 3)*
+M8.3's D13 `codecache_outline` returns a file/directory **symbol skeleton straight from the index**
+(name, type, parent, `start_line`–`end_line`) with **zero source reads** (D7). The existing storage
+API has no path-scoped symbol lookup — `search` is FTS5 `MATCH`-ranked (wrong access path for "all
+symbols in this path"), and `all_indexed_files` returns only paths, not symbols. **Decision: add an
+additive read-only `Storage::symbols_for_path(path: &Path) -> Result<Vec<SymbolOutline>>`** that
+`SELECT`s the skeleton columns directly off the contentful `symbols` FTS5 table
+(`symbol_name, symbol_type, parent_symbol, file_path, start_line, end_line`) `WHERE file_path = ?1`
+(exact file) **OR** `file_path LIKE ?2` with a directory prefix (`<dir>/%`, with SQL `LIKE` wildcards
+in the path escaped), ordered deterministically by `(file_path, start_line, end_line)`. A plain
+column `SELECT` on a contentful FTS5 table is valid and reads the UNINDEXED line columns with no
+re-parse and no file I/O (D7). Returns a small `SymbolOutline` row struct (or reuses a slim
+projection) — **not** a full `Chunk` (the skeleton needs no `chunk_text`/`imports`, keeping the
+result lean for the §11.2 budget). Purely additive: no change to `search`, `insert_chunks`, the
+schema, or any existing caller; no new dependency. Owner: eng-lead (impl) + rust-treesitter-specialist
+(FTS5 `SELECT`/`LIKE`-escaping detail) + manager (this decision + the §3.2.2/§8.2 spec note).
+project_plan §3.2.2 gains the method signature and §8.2 Tool 3 notes the index-only lookup; the
+`mcp_server` outline handler formats these rows via the M7 text skeleton-line shape (D13). RED for
+M8.3 drives the new method + the `tools/call` outline round-trip.
+
 ---
 
 ## Deferred to v0.2+ (from project_plan §9.2)

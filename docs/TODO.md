@@ -218,9 +218,13 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
       `max_tokens` defaults as JSON numbers (4000/2000), `file_filter` default `null`. Schemas in
       `src/mcp_server/tools.rs`. 5 new tests (mcp_tests 11/11); reviewer APPROVED (schemas match §8.2
       char-for-char); 154 tests green, all four gates clean.
-- [ ] **M8.3 — tools/call round-trip**: search→Retriever, update→Indexer stats, **D13
-      `codecache_outline`** (symbol skeleton from the index, zero source reads — D7); bad args → -32602
-      → test-lead → engineering-lead
+- [x] **M8.3 — tools/call round-trip** *(DONE 2026-06-12)*: `search`→`Retriever::query`→M7 text
+      formatter; `update`→force re-index of named files→stats text; **D13 `codecache_outline`**→
+      new **D19 `Storage::symbols_for_path`** (exact file OR `<dir>/%` prefix, LIKE-escaped, ordered
+      `(file_path,start_line,end_line)`, zero source reads — D7) → `SymbolOutline` skeleton lines;
+      unknown tool / missing-arg → -32602, handler-internal failure → -32603. Handlers in
+      `src/mcp_server/handlers.rs`; `serve` loop now `&mut`. 7 new tests (mcp_tests 15/15, storage
+      21/21); reviewer APPROVED (D19 SQL injection-safe + prefix/escape correct); 162 tests green.
 - [ ] **M8.4 — D14 self-healing search**: `codecache_search` hash-checks result files + transparently
       re-indexes changed ones; RED test = stale-file query returns fresh content → test-lead →
       engineering-lead

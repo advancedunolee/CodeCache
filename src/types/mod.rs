@@ -127,6 +127,27 @@ impl Language {
     }
 }
 
+/// A slim, path-scoped symbol projection backing the `codecache_outline` MCP tool (Decision Log
+/// **D19**, plan §3.2.2 / §8.2). Holds only the skeleton fields — name, type, parent, and the D7
+/// 1-based inclusive line range — with no `chunk_text`/`imports`, so an outline of a whole
+/// directory stays within the §11.2 budget. Produced by [`crate::storage::Storage::symbols_for_path`]
+/// straight off the stored columns (zero source reads, D7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolOutline {
+    /// Symbol name, e.g. `authenticate_user`.
+    pub symbol_name: String,
+    /// Whether this is a function, class, method, or struct.
+    pub symbol_type: SymbolType,
+    /// Enclosing class/function for methods and nested definitions, if any.
+    pub parent_symbol: Option<String>,
+    /// Source file the symbol came from.
+    pub file_path: PathBuf,
+    /// 1-based line of the symbol's first line (D7).
+    pub start_line: usize,
+    /// 1-based, inclusive line of the symbol's last line (D7).
+    pub end_line: usize,
+}
+
 /// Write-side metadata bundle for a `files_metadata` row (Decision Log **D6**).
 ///
 /// Carries everything `Storage::update_file_hash` needs to persist a file's row in one call, so

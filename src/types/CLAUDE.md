@@ -24,6 +24,10 @@ Unit tests in-module. No dedicated TEST_STRATEGY row — these types are exercis
   reversible, `None` on unknown → no panic) for text persistence in §4.1. `Language` also derives
   serde (`rename_all = "lowercase"`) so it parses from `config.toml` `languages = [...]`.
 - `FileMeta` (D6) { content_hash, mtime, file_size, language, chunk_count }.
+- `SymbolOutline` (**D19**, M8.3) { symbol_name, symbol_type, parent_symbol, file_path, start_line,
+  end_line } (Debug/Clone/PartialEq/Eq) — the slim per-symbol projection backing
+  `Storage::symbols_for_path` / the `codecache_outline` MCP tool. Carries only the skeleton fields
+  (no `chunk_text`/enrichment) so the outline stays within the §11.2 budget. Dependency-free (D5).
 
 ## Status
 **M1: DONE (2026-06-10).** All four gates green on Rust 1.85.0. Dependency-free, as required by

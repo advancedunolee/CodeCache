@@ -2,7 +2,7 @@
 
 - **Milestone:** M8 — mcp_server  ·  **Module(s):** mcp_server, cli/serve
 - **Owner (manager):** principal-engineering-manager  ·  **Created:** 2026-06-12
-- **Status:** D15 EVAL ✓  ·  DEP DECISION: **RESOLVED (2026-06-12) — HAND-ROLL JSON-RPC over stdio; serde/serde_json only, no new runtime dep. Human-ratified.**  ·  M8.1 RED ✓ GREEN ✓ REVIEW ✓ DONE ✓ (149) · M8.2 RED ✓ GREEN ✓ REVIEW ✓ DONE ✓ (154 tests green) · M8.3 RED ▢
+- **Status:** D15 EVAL ✓  ·  DEP DECISION: **RESOLVED (2026-06-12) — HAND-ROLL JSON-RPC over stdio; serde/serde_json only, no new runtime dep. Human-ratified.**  ·  M8.1 ✓DONE (149) · M8.2 ✓DONE (154) · M8.3 RED ✓ GREEN ✓ REVIEW ✓ DONE ✓ (162 tests green) · M8.4 RED ▢
 - **Links:** docs/ROADMAP.md#m8--mcp_server (D8/D13/D14/D15) · docs/plans/M8-mcp-server.md · docs/project_plan.md §8, §10.2, §10.3 · project_overview.md §2.5
 
 ## Goal
@@ -548,3 +548,282 @@ echoes id; no reachable panic/unwrap/expect; no new deps; all four gates green.
   "M8.2–M8.4 pending" / "149 tests". The root golden rule ties doc updates to the code change;
   these should be flipped to DONE / "154 tests" at manager close-out. Not a code-correctness
   block — the source+test contract is complete and correct.
+
+---
+## RED — test lead (M8.3 — `tools/call` round-trip: search / update / outline + D19 `symbols_for_path`)
+
+**Slice M8.3.** Tests written **first**, split across two files. Existing M8.1+M8.2 tests and
+harness REUSED unchanged (untouched, all 11 still pass). RED confirmed for the right reason.
+
+### Files
+- `tests/storage_tests.rs` — appended a **D19 section**: helper `outline_chunk(...)`,
+  `seed_outline_storage()`, and **3 tests** driving the new `Storage::symbols_for_path` +
+  `types::SymbolOutline`. RED = **compile error** (the method + type do not exist yet).
+- `tests/mcp_tests.rs` — appended an **M8.3 section**: helpers `seed_chunk(...)`,
+  `test_server_seeded(&[Chunk])`, `tools_call_request_line`, `tools_call(server,id,tool,args)`,
+  `call_result_text(resp)`, `assert_error_code(resp,code,id)`, and **4 tests** (#12–#15) driving
+  `tools/call`. RED = **runtime failure** (`tools/call` unhandled → dispatch default arm returns
+  `-32601 method not found: tools/call`). These use only EXISTING public APIs (`serve`,
+  `CodeCacheServer::new`, `codecache::{init,index}`, `Storage`), so they compile today; the server
+  internals (Retriever/Indexer wiring + handlers) are the GREEN target inside the crate.
+
+### Tests added (all RED now)
+`tests/storage_tests.rs` (D19, compile-RED):
+- `symbols_for_path_exact_file_returns_its_symbols_ordered` — exact `src/a.py` → only its 3
+  symbols, ordered by start_line (1,3,10); asserts slim projection round-trips `symbol_type`
+  (typed enum), `parent_symbol` (`Some("a_class")` for the method), D7 line ranges.
+- `symbols_for_path_directory_prefix_returns_all_under_it` — `src` (dir) → `src/a.py` +
+  `src/sub/b.py` symbols, NOT `other.py`; ordered by `(file_path, start_line, end_line)`.
+- `symbols_for_path_unknown_path_returns_empty` — unknown path → empty `Vec`, not an error.
+
+`tests/mcp_tests.rs` (M8.3, runtime-RED):
+12. `call_codecache_search_returns_formatted_results` — seeded index; `tools/call codecache_search
+    {query:"authenticate user"}` → `result.content[0]{type:"text",text}`; text contains the seeded
+    symbol `authenticate_user`, the locator `src/auth.py:45-67`, and the agent-first header
+    (`Query:` echo + `Found`). Substring asserts (not full-string) so wording stays the eng-lead's.
+13. `call_codecache_update_reindexes_and_reports_stats` — builds a REAL project via
+    `codecache::init` + writes `mod.py` + `codecache::index`, then a server over that DB;
+    `tools/call codecache_update {files:[<abs mod.py>]}` → text reports stats (substrings
+    `"1 file"` and `"chunk"`, mirroring §8.3 "Updated N files, indexed M chunks").
+14. `call_codecache_outline_returns_symbol_skeleton` — seeded symbols; FILE path `src/a.py` →
+    skeleton listing `Greeter`/`greet` with `src/a.py:1-20`, and NOT `src/sub/b.py`; DIRECTORY
+    path `src` → spans both files (`Greeter` + `helper`, `src/a.py:1-20` + `src/sub/b.py:1-4`).
+15. `call_with_bad_arguments_returns_invalid_params` — search w/o `query`, outline w/o `path`,
+    update w/o `files`, AND an unknown tool name → all `-32602`, id echoed.
+
+### Pinned decisions (the eng-lead MUST honor — the tests are the contract)
+- **`symbols_for_path` signature:** `pub fn symbols_for_path(&self, path: &Path) ->
+  storage::Result<Vec<SymbolOutline>>`. **`SymbolOutline`** lives in `codecache::types` with fields
+  `{ symbol_name:String, symbol_type:SymbolType, parent_symbol:Option<String>, file_path:PathBuf,
+  start_line:usize, end_line:usize }` (typed `SymbolType`, 1-based inclusive lines D7); derive at
+  least `Debug+Clone+PartialEq+Eq`. **Semantics:** exact `file_path = ?` OR directory prefix
+  `<dir>/%` (escape SQL `LIKE` wildcards `%`/`_` in the path); **ordering** `(file_path, start_line,
+  end_line)` ascending; unknown path → empty `Vec`, never an error. A plain column `SELECT` on the
+  contentful FTS5 `symbols` table reading the UNINDEXED line columns — zero source reads (D7).
+- **`tools/call` envelope:** request `params:{ name, arguments }`; success `result` =
+  `{ content:[ { type:"text", text:<string> } ] }` (non-empty array, first elem text). Pinned
+  exactly by `call_result_text`.
+- **search handler:** `arguments.query` (required) → `Retriever::query` → §6.4.3 text formatter
+  (D13 agent-first). `max_tokens` optional (default 4000 per §8.2). Reuse `formatter::format(…,
+  Format::Text)` so the locator/header shape matches the M7 goldens.
+- **update handler:** `arguments.files` (required, array of strings) → `Indexer::update_files`
+  over the project root → text "Updated {files_processed} files, indexed {chunks_indexed}
+  chunks…" (§8.3). Requires the server to build an `Indexer` (needs `Config` + root); the test
+  drives it through a real on-disk `init`/`index`ed project.
+- **outline handler:** `arguments.path` (required) → `Storage::symbols_for_path` → D13 text
+  skeleton line per symbol carrying `<symbol> … <file>:<start>-<end>`. File OR directory path.
+- **error mapping (PINNED, decision #5):** missing/wrong-typed required arg → `-32602`; **unknown
+  tool name → `-32602`** (the tool `name` is a *param* of `tools/call`, so a bad name is an invalid
+  param, NOT `-32601`). `-32601` stays reserved for an unknown top-level JSON-RPC `method`.
+
+### Required production API surface (GREEN target for the eng-lead)
+- `codecache::types::SymbolOutline` (new struct, fields above).
+- `Storage::symbols_for_path(&self, &Path) -> Result<Vec<SymbolOutline>>` (new, additive; new
+  `queries::SYMBOLS_FOR_PATH` column SELECT + LIKE-escape helper — hand to rust-treesitter-specialist
+  for the FTS5 `SELECT`/`LIKE`-escape detail per D19).
+- `mcp_server`: a `"tools/call"` arm in `CodeCacheServer::dispatch` → `handle_call(&mut self, name:
+  &str, arguments: &Value) -> Result<Value, RpcError>` routing to `handle_search`/`handle_update`/
+  `handle_outline`; unknown name → invalid-params (-32602). `CodeCacheServer` must now hold/lazily
+  build a `Retriever` + `Indexer` over its shared `Storage` (D8) — the `#[allow(dead_code)]` on
+  `storage` from M8.1 comes off here. `handle_update` mutates (Indexer::update_files), so the call
+  path needs `&mut self` — confirm `serve`/`dispatch` thread `&mut` (M8.1 `handle_line` may need a
+  `&mut` upgrade; no test pins immutability).
+
+### Note for the specialist (could not fixture cheaply)
+- **SQL `LIKE` wildcard guard:** a stored/queried path containing `%` or `_` must not over-match in
+  the directory-prefix branch. I did not add a dedicated fixture (constructing a path literally named
+  `a%b/` is awkward + platform-touchy on Windows). The eng-lead/specialist MUST escape `%`/`_` in the
+  prefix (e.g. `LIKE ?2 ESCAPE '\'`) per D19; a unit test in `storage` covering the escape is the
+  right home. Flagging so it is not silently skipped.
+
+### Confirmed RED output (Rust 1.85, this session)
+- `cargo test --test storage_tests --no-run`:
+  ```
+  error[E0432]: unresolved import `codecache::types::SymbolOutline`
+  error[E0599]: no method named `symbols_for_path` found for struct `codecache::storage::Storage` …
+  error: could not compile `codecache` (test "storage_tests") due to 4 previous errors
+  ```
+  → correct reason: the D19 method + type are the GREEN target.
+- `cargo test --test mcp_tests`:
+  ```
+  test result: FAILED. 11 passed; 4 failed; 0 ignored
+  failures: call_codecache_search_returns_formatted_results,
+    call_codecache_update_reindexes_and_reports_stats,
+    call_codecache_outline_returns_symbol_skeleton,
+    call_with_bad_arguments_returns_invalid_params
+  panicked: a successful tools/call must NOT carry an error; got:
+    {"error":{"code":-32601,"message":"method not found: tools/call"},...}
+  ```
+  → correct reason: `dispatch` default arm returns -32601 for `tools/call`; no handler yet. The 11
+  M8.1+M8.2 tests still pass (untouched, not weakened).
+- `cargo fmt --check` → clean (whole tree). The M8.1 fmt blocker is not repeated.
+
+### Run command
+`cargo test --test mcp_tests` (+ `cargo test --test storage_tests` once the D19 method compiles).
+
+## GREEN — engineering lead (M8.3)
+
+**Slice M8.3 GREEN (2026-06-12).** `tools/call` round-trip (search / update / outline) + the
+additive D19 `Storage::symbols_for_path` + `types::SymbolOutline`. serde/serde_json/anyhow only —
+no new deps, no rmcp, no tokio. Did NOT consult the rust-treesitter-specialist: the FTS5
+`LIKE`/`ESCAPE` detail was unambiguous from D19 + §3.2.2 (a plain column SELECT on the contentful
+table; `ESCAPE '\'` with the path-portion wildcards escaped). All five gates green; 162 tests.
+
+### Files changed
+- `src/types/mod.rs` — added `pub struct SymbolOutline { symbol_name, symbol_type, parent_symbol,
+  file_path, start_line, end_line }` (Debug+Clone+PartialEq+Eq; dependency-free per D5).
+- `src/storage/queries.rs` — added `SYMBOLS_FOR_PATH` (column SELECT, `file_path = ?1 OR file_path
+  LIKE ?2 ESCAPE '\'`, ORDER BY `(file_path, start_line, end_line)`).
+- `src/storage/mod.rs` — added `symbols_for_path(&self, &Path) -> Result<Vec<SymbolOutline>>`, the
+  private `escape_like` LIKE-wildcard escaper (`\`→`\\` first, then `%`→`\%`, `_`→`\_`), the
+  `map_outline_row` mapper (typed `SymbolType::from_str_lenient`; unknown → `CorruptRow`, no
+  panic), and a unit test `escape_like_escapes_wildcards_and_backslash`.
+- `src/mcp_server/mod.rs` — `storage` field's `#[allow(dead_code)]` removed; `dispatch`/`handle_line`/
+  `serve` upgraded to `&mut self`/`&mut server` (handle_update mutates the index); added the
+  `"tools/call"` dispatch arm → `handle_tools_call` (parses `params.name`+`arguments`; routes to the
+  three handlers; unknown name → -32602; success → `{content:[{type:"text",text}]}`). Framing /
+  initialize / tools-list behavior unchanged (11 prior tests still green).
+- `src/mcp_server/handlers.rs` — **NEW.** `handle_search`/`handle_update`/`handle_outline` over the
+  shared `Storage` (D8 `.clone()`), each returning the text payload or `(code,message)`. Arg parsing
+  helpers (`require_str`, `optional_usize`) map missing/mistyped required args → -32602; internal
+  failures → -32603. `render_skeleton` emits the D13 `[n] <qualified> (<type>) file:s-e` locator
+  line per symbol with a soft `max_tokens` cap.
+
+### New public API
+- `codecache::types::SymbolOutline` (struct above).
+- `Storage::symbols_for_path(&self, path: &Path) -> storage::Result<Vec<SymbolOutline>>` — exact
+  file OR `<dir>/%` prefix (wildcards escaped), ordered `(file_path, start_line, end_line)`, unknown
+  path → empty Vec, zero source reads (D7).
+- `mcp_server`: `tools/call` now handled; `serve` loop is `&mut server` (signature unchanged — the
+  `serve<R,W>(reader, writer, server)` shape is identical; only the internal binding became `mut`).
+
+### How each test passes
+- D19 `symbols_for_path_exact_file_returns_its_symbols_ordered` — `file_path = ?1` matches `src/a.py`
+  only; ORDER BY start_line yields a_class(1)/a_method(3)/b_func(10); slim projection round-trips
+  typed `SymbolType`, `parent_symbol`, D7 lines.
+- D19 `..._directory_prefix_returns_all_under_it` — `?2 = "src/%"` matches `src/a.py` + `src/sub/b.py`
+  but NOT `other.py`; ordered by `(file_path, start_line)`.
+- D19 `..._unknown_path_returns_empty` — neither branch matches → empty Vec via the row loop.
+- #12 search — `handle_search` → `Retriever::query` → `formatter::format(.., Format::Text)`; text
+  carries `authenticate_user`, `src/auth.py:45-67`, `Query:` echo, `Found`.
+- #13 update — `handle_update` clears each file's `files_metadata` row (so the unchanged-but-
+  explicitly-named file registers as changed) then `Indexer::update_files`; output `"Updated 1 file,
+  indexed N chunks in Tms"` contains `"1 file"` + `"chunk"`.
+- #14 outline — `symbols_for_path` for `src/a.py` (file) lists Greeter/greet with `src/a.py:1-20`,
+  excludes `src/sub/b.py`; for `src` (dir) spans both files (`src/a.py:1-20` + `src/sub/b.py:1-4`).
+- #15 bad args — missing `query`/`path`/`files` → -32602; unknown tool name → -32602 (per pinned
+  decision #5, the `name` is a param of `tools/call`).
+
+### Deviations / decisions (flag for manager + reviewer)
+- **handle_update forces re-index of explicitly-named files.** `Indexer::update_files` skips files
+  whose on-disk hash equals the stored hash (M5.3 idempotency). Test #13 indexes the file, then calls
+  `codecache_update` on the SAME unchanged content and asserts `1 file` processed. The MCP `update`
+  tool is an explicit "re-index these now" request, so the handler deletes each named file's
+  `files_metadata` row first (public `Storage::delete_file_meta`), making it look new to
+  `detect_changed_files`. This does **not** weaken `update_files`' own idempotency contract (the M5.3
+  tests are untouched and green) — it is the handler's documented semantic. No plan/spec change.
+- **Internal-error code -32603.** Retrieval/index/storage failures inside a handler surface as the
+  JSON-RPC standard internal-error code -32603 (no test exercises this path; -32602 stays reserved for
+  argument-shape failures per the RED pins). Flagging for visibility; no test pins -32603.
+- **Indexer root for handle_update.** Built with `Config::default()` + root `"."`; `update_files`
+  re-indexes the explicit paths and never walks `root`, so the root value is inert here.
+- **tests/storage_tests.rs hygiene fix (test-lead's file).** The committed RED file had a dead
+  `use codecache::types::SymbolOutline;` (line 496) — the type is referenced only in comments, never
+  in the test body, so `cargo clippy --all-targets -D warnings` (a required gate) failed on
+  `unused-imports`. I removed ONLY that one dead import line. This changes no assertion, no coverage,
+  no test behavior (provably dead code — the standard `cargo fix` suggestion); it is the same class of
+  test-file hygiene fix the M8.1 reviewer required (fmt). All 7 new + 11 prior assertions are intact.
+  Flagging explicitly per the no-modify-tests rule so the manager/test-lead/reviewer can confirm.
+
+### Gates (all green, Rust 1.85)
+- `cargo test --test mcp_tests` → 15/15 (6 M8.1 + 5 M8.2 + 4 M8.3).
+- `cargo test --test storage_tests` → 21/21 (18 prior + 3 D19).
+- `cargo test` (full suite) → **162 passed, 0 failed** (was 154; +3 D19 + 4 tools/call + 1 new
+  `escape_like` storage unit test).
+- `cargo clippy --all-targets -- -D warnings` → clean.
+- `cargo fmt --check` → clean (whole tree).
+- `cargo build` → clean.
+
+---
+## REVIEW — code reviewer (M8.3)
+
+**VERDICT: APPROVE** (reviewed 2026-06-12, Rust 1.85). The D19 `symbols_for_path` SQL +
+`escape_like` are correct and injection-safe; `tools/call` dispatch + the three handlers match
+§8.2/§8.3 and the brief's pinned error mapping; no reachable panic/unwrap/expect in new production
+code; no new deps; all four gates green at 162 tests. Both flagged test-file deviations verified
+benign.
+
+### Gate results
+- `cargo fmt --check` → clean (exit 0, whole tree).
+- `cargo clippy --all-targets -- -D warnings` → clean (exit 0).
+- `cargo test` → **162 passed, 0 failed** (28 lib unit + 134 integration; mcp_tests 15/15,
+  storage_tests 21/21, indexer_tests 15/15). Matches expected 162.
+- `cargo build` → clean (exit 0).
+
+### D19 `symbols_for_path` SQL + escaping — VERIFIED CORRECT
+- **Parameterized, no interpolation.** `queries::SYMBOLS_FOR_PATH` binds `?1` (exact) and `?2`
+  (prefix) via `params![exact, prefix]`; the path text never enters the SQL string. Injection-safe.
+- **Exact-vs-prefix is correct.** `WHERE file_path = ?1 OR file_path LIKE ?2 ESCAPE '\'` with
+  `?2 = "<escaped path>/%"`. Querying `src` builds prefix `src/%`: a sibling `srcfoo.py` is `!= 'src'`
+  and does NOT match `src/%` (no `/` after `src`), while `src/a.py` and `src/sub/b.py` do. The
+  test `symbols_for_path_directory_prefix_returns_all_under_it` proves `other.py` is excluded and
+  the two `src/` files included; exact-file test confirms a file query returns only its own symbols.
+- **Escaping is correct and ordered.** `escape_like` replaces `\`→`\` FIRST, then `%`→`\%`,
+  `_`→`\_`, so a literal `%`/`_` in a path becomes a literal under `ESCAPE '\'` and cannot
+  over-match; the caller-appended `/%` stays an unescaped wildcard. The unit test
+  `escape_like_escapes_wildcards_and_backslash` pins all three cases incl. the
+  escape-the-escape-char-first ordering (`a\%b` → `a\\%b`).
+- **Deterministic ordering.** `ORDER BY file_path, start_line, end_line` — the seed test inserts
+  `src/a.py` rows out of order (10,1,3) and asserts they come back (1,3,10), proving the SQL sort,
+  not insert echo.
+- **Zero source reads (D7).** A plain column SELECT over the contentful `symbols` table reading the
+  stored UNINDEXED line columns — no `std::fs`, no re-parse anywhere in the path.
+- **Slim projection.** Returns `SymbolOutline {symbol_name, symbol_type, parent_symbol, file_path,
+  start_line, end_line}` — no `chunk_text`/imports. Matches §3.2.2/D19.
+- **No panic on corrupt row.** `map_outline_row` defers `SymbolType::from_str_lenient` into the
+  inner `Result`, mapping an unknown stored `symbol_type` to `StorageError::CorruptRow` (same
+  pattern as `map_search_row`). Unknown path → empty `Vec` (test confirms), never an error.
+
+### tools/call dispatch + handlers — VERIFIED
+- **Error mapping matches the brief.** Missing/mistyped required args (search `query` via
+  `require_str`, outline `path` via `require_str`, update `files` via the array/string checks) →
+  `-32602`; an unknown tool name → `-32602` (the `other =>` arm), NOT `-32601`. Test #15 (a–d)
+  covers all four. Internal retrieval/index/storage failures → `-32603` via `?` on the mapped
+  `Result` — reasonable and not papering over a panic (every `map_err` wraps a real typed error).
+- **Success envelope exact.** `handle_tools_call` returns
+  `json!({ "content": [ { "type":"text", "text": text } ] })` — matches §8.2 and test
+  `call_result_text` (non-empty array, first elem `{type:"text", text:<string>}`).
+- **`&mut self` serve-loop change did not regress M8.1/M8.2.** `dispatch`/`handle_tools_call` take
+  `&mut self` (needed because update mutates the index); `serve` now takes `mut server` and
+  `handle_line(&mut server, ...)`. `initialize`/`tools/list` are unchanged behaviorally — all 11
+  M8.1+M8.2 tests still pass (framing, handshake, error codes, no-panic recovery, stable tool order).
+
+### Two flagged test-file deviations — BOTH VERIFIED BENIGN
+- **(a) `handle_update` deletes each file's `files_metadata` row before `update_files`.** This uses
+  the public `Storage::delete_file_meta` (M5.3 API) in the MCP handler only; it does NOT touch
+  `Indexer::update_files`/`detect_changed_files`. The "re-index these NOW" tool semantic is
+  defensible (an agent calling update expects work even on byte-identical content), and the M5.3
+  idempotency contract is untouched — all 15 `indexer_tests` (incl. the no-write idempotency tests)
+  pass unchanged, since none route through the MCP path. Not a hack hiding a bug.
+- **(b) the "removed dead import" in `tests/storage_tests.rs`.** Verified: `git diff HEAD --
+  tests/storage_tests.rs` shows **ZERO deletions** (191 insertions, 0 deletions) — likewise
+  `mcp_tests.rs` (399 insertions, 0 deletions). Both test files are purely additive. The only
+  `SymbolOutline` occurrences in storage_tests.rs are in the comment block (lines 472–486); the 3
+  D19 tests construct/inspect `SymbolOutline` via field access only, so no `use` import was ever
+  needed. The transient dead-import never landed. No assertion or coverage was weakened; the 3 D19
+  tests assert all six fields (`symbol_name`/`file_path` via the names+scoping checks,
+  `symbol_type`, `parent_symbol`, `start_line`, `end_line` via direct field asserts).
+
+### No new deps / idiomatic
+- `git diff HEAD -- Cargo.toml` empty (not shown changed in the diff stat). serde/serde_json only.
+- No reachable `unwrap`/`expect`/`panic!` in `handlers.rs`, the `mod.rs` additions, or
+  `storage/mod.rs` `symbols_for_path`/`escape_like`/`map_outline_row` (all fallible steps via `?`
+  or `map_err`; `writeln!` into a `String` is infallible and its `Result` is `let _`-discarded).
+
+### Minor (non-blocking — manager close-out)
+- `optional_usize` accepts `max_tokens: 0` (→ `Some(0)`), which makes the outline soft-cap emit
+  only the header. This is a benign caller choice, not a bug, and no test pins it; noting only so
+  the manager is aware the budget has no documented floor.
+- Doc close-out per protocol step 6: flip M8.3 to DONE and update `src/mcp_server/CLAUDE.md`
+  (still reads "M8.3–M8.4 pending") + `src/storage/CLAUDE.md` (add `symbols_for_path`) +
+  `src/types/CLAUDE.md` (add `SymbolOutline`) + `docs/TODO.md` to "162 tests". Not a code block.

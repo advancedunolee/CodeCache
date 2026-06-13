@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::types::{Chunk, FileMeta, Language, SymbolType};
+use crate::types::{Chunk, FileMeta, Language, SymbolOutline, SymbolType};
 
 /// A typed storage error. Wraps the underlying SQLite error plus the cases this layer adds
 /// (poisoned lock, unparseable stored enum). Never panics.
@@ -192,6 +192,28 @@ impl Storage {
         Ok(out)
     }
 
+    /// Path-scoped symbol skeleton for the `codecache_outline` tool (Decision Log **D19**).
+    ///
+    /// Returns every [`SymbolOutline`] whose `file_path` is EXACTLY `path` or lives under it as a
+    /// directory prefix (`<path>/%`), ordered deterministically by `(file_path, start_line,
+    /// end_line)`. A plain column `SELECT` over the contentful `symbols` table reads the stored
+    /// UNINDEXED line columns with no re-parse and no file I/O (D7). An unknown path (matching no
+    /// stored file, exact or prefix) yields an empty `Vec`, never an error. SQL `LIKE` wildcards
+    /// (`%`/`_`) in the path are escaped so a sibling sharing the prefix string never over-matches.
+    pub fn symbols_for_path(&self, path: &Path) -> Result<Vec<SymbolOutline>> {
+        let exact = path_to_str(path);
+        let prefix = format!("{}/%", escape_like(&exact));
+
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(queries::SYMBOLS_FOR_PATH)?;
+        let rows = stmt.query_map(params![exact, prefix], map_outline_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
     /// Read a file's stored content hash, or `None` if the file is unknown.
     pub fn get_file_hash(&self, file_path: &Path) -> Result<Option<String>> {
         let conn = self.lock()?;
@@ -283,6 +305,18 @@ fn path_to_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+/// Escape the SQL `LIKE` metacharacters in a literal path so it can be embedded in a
+/// `<path>/%` prefix pattern without over-matching. With `ESCAPE '\'`, the escape char `\` and
+/// the wildcards `%` (any run) and `_` (any single char) each become a literal by prefixing `\`.
+/// The trailing `/%` the caller appends stays an unescaped wildcard — only the path portion is
+/// escaped (Decision Log D19). Order matters: escape `\` first so we don't double-escape the
+/// backslashes we introduce for `%`/`_`.
+fn escape_like(path: &str) -> String {
+    path.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Raw, untyped columns of a `SEARCH` result row, in `queries::SEARCH` order.
 struct RawSearchRow {
     symbol_name: String,
@@ -356,6 +390,29 @@ fn build_search_result(raw: RawSearchRow) -> Result<SearchResult> {
     })
 }
 
+/// Map a `SYMBOLS_FOR_PATH` row into a [`SymbolOutline`] (D19). Column order matches
+/// `queries::SYMBOLS_FOR_PATH`: `symbol_name, symbol_type, parent_symbol, file_path, start_line,
+/// end_line`. As with `map_search_row`, the inner [`Result`] defers typed-enum validation so a
+/// corrupt stored `symbol_type` becomes a [`StorageError::CorruptRow`], never a panic.
+fn map_outline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<SymbolOutline>> {
+    let symbol_name: String = row.get(0)?;
+    let symbol_type_str: String = row.get(1)?;
+    let parent_symbol: Option<String> = row.get(2)?;
+    let file_path: String = row.get(3)?;
+    let start_line: i64 = row.get(4)?;
+    let end_line: i64 = row.get(5)?;
+    Ok(SymbolType::from_str_lenient(&symbol_type_str)
+        .ok_or_else(|| StorageError::CorruptRow(format!("unknown symbol_type '{symbol_type_str}'")))
+        .map(|symbol_type| SymbolOutline {
+            symbol_name,
+            symbol_type,
+            parent_symbol,
+            file_path: std::path::PathBuf::from(file_path),
+            start_line: start_line as usize,
+            end_line: end_line as usize,
+        }))
+}
+
 /// Inverse of `Vec::join("\n")` used when storing list columns. An empty stored string yields an
 /// empty vec (not a one-element vec containing "").
 fn split_joined(s: &str) -> Vec<String> {
@@ -369,6 +426,18 @@ fn split_joined(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_like_escapes_wildcards_and_backslash() {
+        // A plain path is unchanged.
+        assert_eq!(escape_like("src/auth"), "src/auth");
+        // `%` and `_` become literals (prefixed with the `\` escape char).
+        assert_eq!(escape_like("a%b"), "a\\%b");
+        assert_eq!(escape_like("a_b"), "a\\_b");
+        // The escape char itself is escaped first, so it does not consume a following metachar.
+        assert_eq!(escape_like("a\\b"), "a\\\\b");
+        assert_eq!(escape_like("a\\%b"), "a\\\\\\%b");
+    }
 
     #[test]
     fn split_joined_handles_empty_and_multi() {
