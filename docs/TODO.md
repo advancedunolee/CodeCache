@@ -369,7 +369,7 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
               tests (4 storage / 1 retriever / 3 cli / 4 cli-parser unit); **208 total** green; fmt +
               clippy(-D warnings) + test all clean (reviewer re-ran them); `Cargo.toml` untouched.
               storage/retriever/cli CLAUDE.md + TEST_STRATEGY.md updated. → BRIEF-R2.2a-bm25-weights-flag.md
-        - [x] **R2.2b (research sweep) DONE 2026-06-14 (main session).** Sweeps the 6-vector grid over the
+        - [x] **R2.2b (research sweep) DONE 2026-06-14 (main session); code-reviewer APPROVED — finding independently reproduced.** Sweeps the 6-vector grid over the
               15-query `micro_suite.json` via `--bm25-weights` across the process boundary; scores Layer-1 +
               NDCG@10; macro-averages one ablation row per vector. Pure `research/`, zero crate change, zero
               spend. `sweep.py` (pure: grid/`load_suite`/`score_vectors`/`rank_vectors`, binary-free via an
