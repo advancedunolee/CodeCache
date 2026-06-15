@@ -407,9 +407,27 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
             rows per arm) RAN (Linux debug binary built from the crate — the only Linux-runnable binary on this
             WSL2 machine); ruff clean; `Cargo.toml`/`src/`/Rust-`tests/` untouched. Brief:
             `.claude/briefs/BRIEF-R2.3b-stub-chunker-ab-plumbing.md`. → R2.4 next.
-      - [ ] **R2.4 (UNGATED) ablation-table reporter** — pure deterministic emit of {chunking × weights ×
-            enrichment} results + top-config selection (extends `report.py`'s pattern). → research-harness-engineer
-      - [ ] **R2.5 (GATED: license #1 + network/HF #2) external-corpus loader** — map CodeRAG-Bench RepoEval
+      - [x] **R2.4 (UNGATED) ablation-table reporter — DONE 2026-06-15 — code-reviewer APPROVED** (0 blockers,
+            2 non-blocking nits; reviewer independently re-ran ruff + pytest on Linux, recomputed the pinned
+            weighted-aggregation case, confirmed core purity + no-winner scope discipline). Bundled a
+            **broken-window fix**: `test_normalize_relative_path_backslashes_to_posix` scoped to Windows via
+            `@pytest.mark.skipif(sys.platform != "win32", ...)` (assertion body UNCHANGED — no test weakening;
+            now SKIPS on Linux so `pytest research/r1_harness` is 100% green). `r1harness/ablation_report.py`
+            (pure core, no file/binary I/O: `aggregate_ab_rows` n_queries-WEIGHTED A/B aggregation Σnᵢ·mᵢ/Σnᵢ
+            — query-equal, NOT corpus-equal; `render_markdown` Markdown tables + directional/PROXY/not-a-
+            published-finding disclaimer; `select_top_config` reuses `sweep.rank_vectors`) + thin loaders +
+            `run_report.py` entrypoint (mirrors `run_sweep.py`/`run_ab.py`; missing-report → clean nonzero exit,
+            no traceback). 14 new pytest tests green (**88 passed, 1 skipped** total). ruff check + format clean
+            (30 files). Reporter RUN for real against `target/debug/codecache`: sweep + A/B reports regenerated;
+            Markdown table rendered to `runs/ablation/report.md` (NOT committed — `runs/` blanket-gitignored,
+            matching R2.2b/R2.3b precedent). **Finding (directional, PROXY — NOT published):** on the 15-query
+            micro-suite 5/6 weight vectors tie at NDCG@10=0.822 (Recall@10 saturates over the ≤9-chunk corpora);
+            only degenerate `name_only` degrades (NDCG@10 0.672) — shipped default `(10,1,1,5,2,2,2)` is the
+            grid-first tied-best, so the proxy AGREES with it; native vs stub chunker tie on NDCG@10 (no winner
+            asserted — outcome-agnostic, overview §7). `Cargo.toml`/`src/`/Rust-`tests/`/`.claude/settings.json`
+            untouched. Committed locally `f6ff03c` (explicit pathspec; `runs/` + `.claude/settings.json`
+            excluded; not pushed). Brief: `.claude/briefs/BRIEF-R2.4-ablation-reporter.md`. → **R2.5 next (GATED).**
+      - [ ] **R2.5 (GATED: license #1 + network/HF #2) external-corpus loader — NEXT** — map CodeRAG-Bench RepoEval
             (or ContextBench-Lite) gold → our `gold_files`/`gold_blocks` schema (scorer unchanged, D21). → research-harness-engineer
       - [ ] **R2.6 (GATED: astchunk dep #3) cAST baseline chunker** — replace the R2.3 stub with the astchunk
             PyPI package (MIT, research-only). → research-harness-engineer

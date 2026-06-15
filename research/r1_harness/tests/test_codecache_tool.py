@@ -6,6 +6,7 @@ against the real binary is verified separately (see README "Running").
 """
 
 import json
+import sys
 
 import pytest
 
@@ -19,6 +20,9 @@ def test_normalize_absolute_path_under_repo(tmp_path):
     assert normalize_path(str(abs_fp), tmp_path) == "src/auth/authenticate.py"
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows-specific path semantics: backslash is a path separator only on Windows"
+)
 def test_normalize_relative_path_backslashes_to_posix():
     assert normalize_path("src\\auth\\authenticate.py", None) == "src/auth/authenticate.py"
 
