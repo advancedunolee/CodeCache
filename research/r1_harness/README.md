@@ -32,10 +32,12 @@ research/r1_harness/
 │   ├── bash_env.py        # portable `bash -c` environment for mini (not cmd.exe on Windows)
 │   ├── runner.py          # LoggingAgent over mini's DefaultAgent; deterministic OR live mode
 │   ├── report.py          # pure trajectory scoring (mini-free)
-│   └── arms.py            # A0/A1/A4 + Task definitions
+│   ├── arms.py            # A0/A1/A4 + Task definitions
+│   └── sweep.py           # R2.2b: BM25 weight-sweep core (pure; binary-free via injected query_fn)
 ├── tasks/auth_q1.json     # the R1 single task (gold mirrors the M10.2 fixture verbatim)
 ├── validate_offline.py    # run A0/A1/A4 offline (DeterministicModel) → runs/report.json
 ├── run_live.py            # run A0/A1/A4 against a live local model (Ollama via litellm) → runs/live/
+├── run_sweep.py           # R2.2b: run the BM25 weight sweep vs the binary → runs/sweep/report.json
 ├── tests/                 # pytest: scorer (mirrors retrieval_quality.rs), trajectory, corpus, extractor, …
 ├── requirements.txt       # mini-swe-agent==2.4.1 (runner only) + pytest
 └── pyproject.toml
@@ -75,6 +77,22 @@ PYTHONUTF8=1 python run_live.py --model-class litellm_textbased  # bash-block mo
   llama3/phi3 also need). Fixed a grep `./`-prefix measurement bug (+regression test; pytest 38→39).
 - **Gated (separate, downstream):** the ~$1K **R3** API spend and any paid benchmark/API access — **not**
   authorised by R1.
+
+## R2 — offline ablations (in progress; D23)
+**R2.2 (BM25 weight ablation) — DONE.** `codecache query --bm25-weights "<7 csv>"` (R2.2a / D24) lets the
+sweep vary the 7 per-column FTS5 weights per call; `sweep.py` scores the 6-vector grid over the 15-query
+`micro_suite.json` and macro-averages Layer-1 + NDCG@10 into one row per vector (`run_sweep.py`, no agent,
+no spend):
+```bash
+PYTHONUTF8=1 python run_sweep.py     # → runs/sweep/report.json + a ranked ablation table
+```
+**Finding (directional, PROXY — not a published result):** the shipped default `10,1,1,5,2,2,2` is **not
+beaten** — default/flat/body_heavy/name_strong/enrich_heavy score identically (NDCG@10 block 0.822). The
+flag *is* applied (raw `bm25` scores differ across vectors) but the gold blocks order the same. Only the
+degenerate `name_only` degrades (0.672), because zeroing body/enrichment drops gold blocks that match by
+cross-reference, not name. Recall@10 saturates (top-10 ≈ the whole ≤9-chunk corpus), so the micro-suite
+can't separate reasonable weightings — the empirical case for the gated real corpus (R2.5–R2.7). R2.4 will
+emit the formal ablation table. This validates the *apparatus*; it is **not** a weights finding.
 
 ## Scope discipline (`project_overview.md` §7)
 R1 builds the outcome-agnostic *apparatus* only. **No arm-winner claim is made here** — which

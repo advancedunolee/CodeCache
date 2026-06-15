@@ -355,7 +355,7 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
             port) + `ndcg_file`/`ndcg_block` in `MetricAtK`/`score_query`/`macro_average`; 10 hand-computed
             `tests/test_scorer.py` cases. **49 pytest + ruff green; code-reviewer APPROVED** the slice. (ruff
             gate baseline for the research tree stood up in the same effort, commit `9b42702`.)
-      - [~] **R2.2 (UNGATED scaffolding; +crate flag) BM25 weight-sweep** over the retriever via the
+      - [x] **R2.2 (UNGATED scaffolding; +crate flag) BM25 weight-sweep — DONE 2026-06-14** over the retriever via the
             `codecache_tool.py` process boundary. **Confirmed:** the 7 per-column weights are hardcoded in
             `src/storage` with no CLI/config surface → varying them needs a small test-first crate flag
             (`Cargo.toml` untouched). → research-harness-engineer (+ test-lead/eng-lead for the crate flag)
@@ -369,13 +369,20 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
               tests (4 storage / 1 retriever / 3 cli / 4 cli-parser unit); **208 total** green; fmt +
               clippy(-D warnings) + test all clean (reviewer re-ran them); `Cargo.toml` untouched.
               storage/retriever/cli CLAUDE.md + TEST_STRATEGY.md updated. → BRIEF-R2.2a-bm25-weights-flag.md
-        - [~] **R2.2b (research sweep) — IN PROGRESS (main session owns).** Drive the now-exposed
-              `--bm25-weights` flag across the `codecache_tool.py` boundary to sweep weight settings and score
-              via the R2.1 NDCG@10 / Layer-1 scorer over the 15-query `micro_suite.json` (3 corpora); the
-              shipped default `10,1,1,5,2,2,2` is the baseline row. Pure `research/`, zero crate change. → research-harness-engineer
-              **Step 1 (done, committed):** `build_query_args()` + `CodeCacheIndex.query(bm25_weights=…)`
-              thread the flag (arity-validated; absent ⇒ default path); tests-first, 52 pytest + ruff green.
-              **Step 2 (next):** `sweep.py` grid × queries → per-vector macro-avg Layer-1 (R2.4 emits the table).
+        - [x] **R2.2b (research sweep) DONE 2026-06-14 (main session).** Sweeps the 6-vector grid over the
+              15-query `micro_suite.json` via `--bm25-weights` across the process boundary; scores Layer-1 +
+              NDCG@10; macro-averages one ablation row per vector. Pure `research/`, zero crate change, zero
+              spend. `sweep.py` (pure: grid/`load_suite`/`score_vectors`/`rank_vectors`, binary-free via an
+              injected `query_fn`) + `run_sweep.py` (real run → `runs/sweep/report.json`) + `test_sweep.py`
+              (4 tests). 56 pytest + ruff green. Step 1 = commit `1127809`; step 2 (sweep+run) = this commit.
+              **Finding (directional, PROXY — NOT a published result):** the shipped default `10,1,1,5,2,2,2`
+              is **not beaten** — default/flat/body_heavy/name_strong/enrich_heavy give *identical* Layer-1
+              (NDCG@10 block 0.822; keyword-only 0.948). The flag **is** applied (verified: raw `bm25` scores
+              differ across vectors) but gold orders the same. Only degenerate `name_only` (10,0,0,0,0,0,0)
+              degrades (NDCG@10 0.672; R@1 0.60→0.37): zeroing body/enrichment drops gold blocks that match by
+              cross-reference, not name (verified — `authenticate_user` falls rank 2→4 on the session-token
+              query). Recall@10 saturates (top-10 ≈ whole ≤9-chunk corpus) ⇒ the micro-suite can't separate
+              reasonable weightings — the empirical case for the gated real corpus (R2.5–R2.7). → R2.4 emits the formal table.
       - [ ] **R2.3 (UNGATED) chunker-swap seam** with an in-harness stub chunker (proves A/B plumbing before
             astchunk). Reuses `corpus.py`. → research-harness-engineer
       - [ ] **R2.4 (UNGATED) ablation-table reporter** — pure deterministic emit of {chunking × weights ×
