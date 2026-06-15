@@ -13,3 +13,7 @@ runs/
 
 # Vendored mini-swe-agent checkout (installed via requirements.txt, not committed)
 vendor/
+
+# R2.5a external-corpus cache (downloaded by fetch_contextbench.py; gitignored per D26
+# CC-BY-SA share-alike constraint — do NOT commit corpus blobs).
+cache/

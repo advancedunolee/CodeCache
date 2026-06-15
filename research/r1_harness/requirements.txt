@@ -10,6 +10,13 @@
 
 mini-swe-agent==2.4.1
 
+# R2.5a external-corpus loader — HF stack (research-only; one-time cached download;
+# no auth token; fetch entrypoint only — test suite and mapper core do NOT import these).
+# Pinned exact versions: datasets 5.0.0 + huggingface_hub 1.19.0 (verified available
+# on PyPI 2026-06-15 via venv probe on system Python 3.12.3).
+datasets==5.0.0
+huggingface_hub==1.19.0
+
 # Dev / test:
 pytest>=8.0
 ruff>=0.15        # lint + format gate for the research tree (ROADMAP D23)

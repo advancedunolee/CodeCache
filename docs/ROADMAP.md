@@ -628,6 +628,56 @@ amendment) → test-lead (RED) → eng-lead (GREEN) → code-reviewer (APPROVE).
 gatekept by the normal TDD team; **research-harness-engineer does NOT touch the crate** (R2.3b is its pure
 `research/` follow-on). Brief: `.claude/briefs/BRIEF-R2.3a-chunk-ingestion-seam.md`.
 
+### D26 — R2.5 external-corpus gates: Corpus = BOTH (ContextBench-Lite + CodeRAG-Bench RepoEval); Network/HF = AUTHORIZED (one-time cached download, zero paid spend)  · **Adopted 2026-06-15 (human-ratified, spike→ratify→build)** (plan: research track R2.5) — *overview §5–§7; D23 GATED items R2.5–R2.7*
+
+> **Spike → human ratify → build (the D15/D22/D23/D25 pattern), now ratified.** D23 deferred the external-corpus
+> gates (license #1, network/HF #2) pending a human decision; this entry records the **ratified disposition
+> (2026-06-15)**. Zero paid spend, pure `research/`, additive. This authorizes a **one-time, cached, no-auth
+> HuggingFace download** for the research harness **only** — the **product stays air-gapped** (the
+> zero-dependency single-binary identity, D12/D15, is unchanged; nothing here is a Rust dependency or ships in a
+> release artifact). The **~$1K R3 API spend** and any paid benchmark/API access remain **separate downstream R3
+> gates — NOT authorized by this ratification.**
+
+R2's exit (D23) needs (a) a real-corpus Layer-1 ablation table and (b) a published-BM25-baseline reproduction.
+The human chose **BOTH corpora**, each for the job it fits:
+- **ContextBench-Lite** — the real-corpus ablation table (cleanest license). **Apache-2.0** (confirmed:
+  `github.com/EuniAI/ContextBench`, paper arXiv:2602.05892). HF dataset `Contextbench/ContextBench`, **parquet**;
+  verified/"Lite" subset = **500 tasks** (config `contextbench_verified`; full = 1,136). Human-annotated gold
+  contexts (file/block/line). **No static BM25 baseline** — its native eval is agent-trajectory based, so we use
+  it **ONLY as a Layer-1 gold corpus** (our scorer over its static gold), **NOT for number-reproduction.**
+- **CodeRAG-Bench RepoEval (function slice)** — the published-BM25 reproduction + cAST comparability.
+  `github.com/code-rag-bench/code-rag-bench`, paper arXiv:2406.14497 (NAACL'25 Findings). Data license
+  **CC-BY-SA 4.0** (per paper/release — **the engineer MUST confirm the exact LICENSE file as the first R2.5b
+  build step**; the GitHub-API license read 504'd through the env proxy this turn). **NDCG@10 is its primary
+  retrieval metric**; the **RepoEval function** split is the reported one; BEIR format
+  (`corpus.jsonl`/`queries.jsonl` + qrels) on HF. This is the source of the published BM25 NDCG@10 number **R2.7**
+  reproduces (±0.03 absolute, per D23). RepoEval/RepoCoder underlying data is **MIT**.
+
+**Network/HF authorization (scoped).** Authorize adding `datasets` + `huggingface_hub` to the research venv and a
+**one-time, cached corpus download** — **no auth token, zero paid spend.** Tests run against the cached/fixture
+slice, **never re-downloading** (hermetic + deterministic — follows the `runs/` ignore precedent). **Environment
+de-risked this turn:** PyPI + huggingface.co are reachable (HTTP 200) from the build/bash env;
+`datasets`/`huggingface_hub` are not yet installed; Python is system `/usr/bin/python3` 3.12.3 (the engineer
+decides venv-vs-system install and records it in requirements + `research/CLAUDE.md`).
+
+**Licensing housekeeping (HARD).** **Download-and-cache locally (gitignored); do NOT vendor** the CC-BY-SA data
+into the tracked tree (avoids share-alike redistribution obligations). ContextBench Apache-2.0 is fine either
+way but follows the same cache-not-vendor pattern for consistency. Provenance/attribution notes go in
+`research/CLAUDE.md` (or a NOTICE).
+
+**Sub-slicing (mirrors R2.2/R2.3).** **R2.5a (BUILD NOW):** dependency + loader framework + the Apache-2.0
+**ContextBench-Lite loader** — a pure-logic, binary-free, network-free mapper (unit-tested against a tiny
+inline/fixture sample) that maps ContextBench-Lite gold → the existing **`SweepQuery` shape** (`corpus_id`,
+`query_id`, `query`, `query_type`, `gold_files: frozenset[str]`, `gold_blocks: frozenset[(file_path,
+symbol_name)]`) so it drops into `score_vectors`/`run_ab`/the R2.4 reporter **unchanged** (the "scorer
+unchanged, D21" constraint); network confined to a thin **fetch entrypoint** that downloads once → pins a
+**cached slice** under a gitignored cache dir. Honest scope note: ContextBench-Lite gives a real-corpus
+ablation, **NOT** a published-number reproduction. **R2.5b (NEXT, separate slice):** the CodeRAG-Bench RepoEval
+**BEIR loader** (`corpus.jsonl`/`queries.jsonl` + qrels → `SweepQuery` gold); confirm the CC-BY-SA LICENSE; this
+is what **R2.7** reproduces the BM25 NDCG@10 against. Owner: manager (this decision + the gate ratification) →
+research-harness-engineer (R2.5a build, then R2.5b). Brief:
+`.claude/briefs/BRIEF-R2.5-external-corpus-loader.md`.
+
 ---
 
 ## Deferred to v0.2+ (from project_plan §9.2)
