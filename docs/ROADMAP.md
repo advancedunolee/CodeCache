@@ -956,6 +956,42 @@ those remain #2 real `repository` URL [now partially addressed: human set it to
 Owner: manager (this decision + doc-sync) + main session (the validated `Cargo.toml`/`README.md`
 change + local commit). Cross-references **D30** (crate rename) and the curated-public-repo plan.
 
+### D32 — Built-in default ignore patterns applied during discovery (opt-out via `use_default_ignores`)  · **Adopted 2026-06-20** (plan: post-M10 hardening; affects M5 `indexer`/`config`) — *spec: §7.3, §5.1*
+
+**Real-world finding (verified against the source).** The installed `codecache` binary was run
+against a Python project (`CSE4059_LLM_exercise`) that had **no `.gitignore`**. The index came out
+**716 files / 12 356 chunks — 100 % from the project's `env/` virtualenv** (pip's vendored
+internals); the actual source (`backbone.py`, `benchmark.py`) was never surfaced and every query
+returned venv noise. Confirmed gap, not user error: `discovery.rs` walks via
+`WalkBuilder::new(..).require_git(false)` (honors `.gitignore` + skips **hidden** entries, so
+`.git/` is excluded, but does nothing for **non-hidden** junk dirs), and `config.ignore_patterns`
+is `#[serde(default)]` over `Vec<String>` (**empty** by default). With no `.gitignore` and the
+default config, `env/`, `.venv/`, `node_modules/`, `__pycache__/`, `target/`, `dist/`, `build/`
+are all walked and indexed.
+
+**Decision.** Apply a built-in default exclude list **always** during discovery — independent of
+`.gitignore` and of user `ignore_patterns` — so CodeCache degrades gracefully without a hand-written
+`.gitignore`. The set: `env/`, `.venv/`, `venv/`, `node_modules/`, `__pycache__/`, `*.pyc`,
+`target/`, `dist/`, `build/`, `.git/` (the last is harmless — already hidden-skipped).
+
+**Design (transparency-first, the human's lean).** A separate, disable-able knob rather than a
+silent merge into `ignore_patterns`:
+- New config field **`use_default_ignores: bool`**, `#[serde(default = ...)]` → **`true`**. It is a
+  single boolean (no new schema section) — the cleanest fit for §7.3.
+- A module-level const **`DEFAULT_IGNORE_PATTERNS`** in the `indexer` (its only consumer) holds the
+  list; discovery folds it into the same anchored gitignore-style matcher that already applies
+  `config.ignore_patterns`.
+- **User `config.ignore_patterns` EXTENDS the defaults — it never replaces them.**
+- Opt-out: set `use_default_ignores = false` (only `.gitignore` + `ignore_patterns` then apply) —
+  the escape hatch for a repo that legitimately wants to index a `build/`-named directory.
+
+**Scope.** A `--no-default-ignore` CLI flag is **out of scope** for this slice (the config knob is
+sufficient; building an undriven CLI surface would violate TDD). Possible v0.1.x follow-up if a
+per-invocation override is requested. Owner: manager (this decision + plan/doc-sync) → test-lead
+(RED) → engineering-lead (GREEN) → reviewer. Brief:
+`.claude/briefs/BRIEF-discovery-default-ignores.md`. Cross-references **M5.1** discovery (the
+`build_ignore_patterns` seam this extends).
+
 ---
 
 ## Deferred to v0.2+ (from project_plan §9.2)

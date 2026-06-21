@@ -107,6 +107,18 @@ and is not re-stamped (idempotency held). Measured on this WSL2/Linux machine: 1
   `delete_chunks_for_file`/`update_file_hash`, used by the reconcile + restamp paths.
 - Slices M5.1–M5.4 + execution sequence: [`.claude/briefs/BRIEF-M5-indexer.md`](../../.claude/briefs/BRIEF-M5-indexer.md).
 
+## Built-in default ignores (D32 / §7.3 — 2026-06-20)
+`discovery.rs` exposes module-level `pub(crate) const DEFAULT_IGNORE_PATTERNS: &[&str]` (`env/`,
+`.venv/`, `venv/`, `node_modules/`, `__pycache__/`, `*.pyc`, `target/`, `dist/`, `build/`, `.git/`).
+When `config.use_default_ignores` is `true` (the default), `build_ignore_patterns` adds each entry to
+the `GitignoreBuilder` FIRST (mapping a bad glob to `IndexError::Glob` exactly like a user pattern),
+THEN the user's `config.ignore_patterns` (so user globs *extend*, never replace). When `false`, the
+defaults are skipped — only `.gitignore` (still honored by `WalkBuilder`) + `config.ignore_patterns`
+apply. Fixes the verified `env/` virtualenv bug (a repo with no `.gitignore` was swamped by vendored
+noise). Pinned by `indexer_tests::{discovery_excludes_fake_virtualenv_by_default_with_no_gitignore,
+discovery_excludes_all_default_ignored_dirs_and_pyc_by_default,
+discovery_includes_virtualenv_when_default_ignores_disabled, discovery_user_patterns_extend_default_ignores}`.
+
 ## Decisions / seams
 - **`is_heuristic` persistence — deferred to M7.** M5 passes the chunker's `is_heuristic` through
   in-memory to `insert_chunks`, but the M1 `symbols` schema has no column for it, so the stored

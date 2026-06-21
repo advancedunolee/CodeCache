@@ -613,3 +613,19 @@ on a live Python/TS/Go repo. 32 findings confirmed (0 critical), 5 refuted by th
   - [x] **Bare-`\r` line endings** — `parser::extend_to_line_end` now extends a span over a lone `\r`
         (after the `\r\n` arm). RED→GREEN unit test `extend_to_line_end_covers_lf_crlf_bare_cr_and_eof`
         (+1 Rust test → **230 passed/0 failed**).
+
+---
+
+### Post-M10 hardening — built-in default ignores (D32, 2026-06-20) · brief: [`.claude/briefs/BRIEF-discovery-default-ignores.md`](../.claude/briefs/BRIEF-discovery-default-ignores.md)
+- [x] **Default ignore patterns (D32 / §7.3).** A repo with NO `.gitignore` was swamped by vendored
+      noise (verified `env/` virtualenv bug: 716 files / 12 356 chunks, 100% venv). Added
+      `Config.use_default_ignores: bool` (`#[serde(default)]` → `true`) + module-level
+      `DEFAULT_IGNORE_PATTERNS` const in `src/indexer/discovery.rs` (`env/ .venv/ venv/ node_modules/
+      __pycache__/ *.pyc target/ dist/ build/ .git/`). `build_ignore_patterns` folds the defaults in
+      FIRST when the knob is on, then `config.ignore_patterns` EXTENDS (never replaces); `false` opts
+      out (only `.gitignore` + user patterns apply). RED→GREEN: 4 `indexer_tests` (regression + all-dirs
+      + opt-out + user-extends) + 3 `config::tests` (default/omit-loads-true/false-round-trips). +7
+      tests → **238 passed/0 failed**; all four gates green (Rust 1.85). Plan-first: §7.3 schema + §5.1
+      discovery note + ROADMAP D32. code-reviewer **APPROVED** (0 blockers; verified the dir-glob
+      `env/` exclusion via the regression+opt-out test pair; bundled a §5.1 pseudocode fix for the
+      stale 2-arg `discover_files` snippet). → test-lead → engineering-lead → code-reviewer → manager.

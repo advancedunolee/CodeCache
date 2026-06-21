@@ -832,3 +832,129 @@ fn deleted_file_has_chunks_removed_and_metadata_cleared() {
         "total_chunks must decrease after a file's chunks are removed"
     );
 }
+
+// ═══════════════════════ Default ignore patterns (D32) ═══════════════════════
+//
+// Built-in, disable-able default ignores so a repo with NO `.gitignore` is not swamped by
+// vendored/build noise (the verified `env/` virtualenv bug: 716 files / 12 356 chunks, 100% venv).
+// Ratified: Decision Log D32 · project_plan §7.3 (new `Config.use_default_ignores: bool`, default
+// `true`) · §5.1 (discovery note). The default set (gitignore-style globs) is, regardless of any
+// `.gitignore` or user `config.ignore_patterns`:
+//   env/  .venv/  venv/  node_modules/  __pycache__/  *.pyc  target/  dist/  build/  .git/
+// User `config.ignore_patterns` EXTENDS (never replaces) these. `use_default_ignores = false` opts
+// out — only `.gitignore` + user patterns then apply.
+//
+// API pinned for the engineering lead (does NOT exist yet ⇒ these are RED):
+// ```ignore
+// pub struct Config { /* … */ pub use_default_ignores: bool /* #[serde(default)] → true */ }
+// ```
+// `discover_files(config, root)` (unchanged signature) must honor the new field. Repos are built at
+// runtime under a `TempDir` with NO `.gitignore` unless a test writes one; assertions sort for
+// determinism, exactly like the M5.1 helpers above.
+
+#[test]
+fn discovery_excludes_fake_virtualenv_by_default_with_no_gitignore() {
+    // THE BUG REGRESSION (D32): a repo with a fake `env/` virtualenv tree and NO `.gitignore`.
+    // Default config (use_default_ignores defaults to true) must return ONLY the real source —
+    // the `env/` tree is excluded by the built-in `env/` default, not by any `.gitignore`.
+    let repo = temp_repo();
+    let root = repo.path();
+    write_file(
+        root,
+        "env/lib/site-packages/pip/_internal.py",
+        "def main():\n    return 0\n",
+    );
+    write_file(root, "backbone.py", "def serve():\n    return 1\n");
+
+    let config = config_with_languages(vec![Language::Python]);
+
+    assert_eq!(
+        discovered_rel_paths(&config, root),
+        vec!["backbone.py".to_string()],
+        "with no .gitignore and default config, the `env/` virtualenv tree must be excluded by the \
+         built-in default ignores; only real source (backbone.py) is discovered"
+    );
+}
+
+#[test]
+fn discovery_excludes_all_default_ignored_dirs_and_pyc_by_default() {
+    // Every other built-in default dir is excluded too, and a stray `.pyc` is gone; a sibling real
+    // source file survives. File extensions are deliberately CONFIGURED languages (.py/.ts/.go) so
+    // the DIRECTORY default — not the language filter — is what excludes `node_modules/pkg/index.ts`
+    // etc. (`*.pyc` is also not a source extension, but the default `*.pyc` glob is the contract.)
+    let repo = temp_repo();
+    let root = repo.path();
+    write_file(root, "node_modules/pkg/index.ts", "export const x = 1;\n");
+    write_file(root, "__pycache__/mod.py", "CACHED = True\n");
+    write_file(root, "build/out.py", "BUILT = True\n");
+    write_file(root, "dist/bundle.py", "DIST = True\n");
+    write_file(root, "target/debug/app.go", "package main\nfunc m() {}\n");
+    write_file(root, "stale.pyc", "compiled bytes\n");
+    write_file(root, "keep.py", "def keep():\n    return 1\n");
+
+    // All three v0.1 languages so the directory-default (not a language filter) does the excluding.
+    let config = config_with_languages(vec![Language::Python, Language::TypeScript, Language::Go]);
+
+    assert_eq!(
+        discovered_rel_paths(&config, root),
+        vec!["keep.py".to_string()],
+        "node_modules/, __pycache__/, build/, dist/, target/ and *.pyc must all be excluded by the \
+         built-in default ignores; only the sibling keep.py survives"
+    );
+}
+
+#[test]
+fn discovery_includes_virtualenv_when_default_ignores_disabled() {
+    // OPT-OUT: the same `env/` repo, but `use_default_ignores = false`. With the defaults disabled
+    // and no `.gitignore`, the `env/...py` file IS returned (only .gitignore + user patterns apply,
+    // and there are neither) — proving the knob actually turns the defaults off.
+    let repo = temp_repo();
+    let root = repo.path();
+    write_file(
+        root,
+        "env/lib/site-packages/pip/_internal.py",
+        "def main():\n    return 0\n",
+    );
+    write_file(root, "backbone.py", "def serve():\n    return 1\n");
+
+    let config = Config {
+        use_default_ignores: false,
+        ..config_with_languages(vec![Language::Python])
+    };
+
+    assert_eq!(
+        discovered_rel_paths(&config, root),
+        vec![
+            "backbone.py".to_string(),
+            "env/lib/site-packages/pip/_internal.py".to_string(),
+        ],
+        "with use_default_ignores = false and no .gitignore, the `env/` source file must be \
+         returned alongside backbone.py (defaults disabled)"
+    );
+}
+
+#[test]
+fn discovery_user_patterns_extend_default_ignores() {
+    // EXTENSION, not replacement: default config (use_default_ignores = true) PLUS a user
+    // `ignore_patterns = ["*_generated.py"]`. BOTH the `env/` venv default AND the user glob apply,
+    // so only the plain real file survives. (If user patterns replaced the defaults, `env/...py`
+    // would leak through.)
+    let repo = temp_repo();
+    let root = repo.path();
+    write_file(root, "env/lib/x.py", "def x():\n    return 0\n");
+    write_file(root, "schema_generated.py", "GENERATED = True\n");
+    write_file(root, "real.py", "def real():\n    return 1\n");
+
+    let config = Config {
+        languages: vec![Language::Python],
+        ignore_patterns: vec!["*_generated.py".to_string()],
+        ..Config::default()
+    };
+
+    assert_eq!(
+        discovered_rel_paths(&config, root),
+        vec!["real.py".to_string()],
+        "user ignore_patterns must EXTEND the built-in defaults: both env/ (default) and \
+         *_generated.py (user) are excluded; only real.py survives"
+    );
+}

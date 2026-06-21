@@ -25,6 +25,13 @@ pub struct Config {
     /// Glob patterns to ignore, in addition to `.gitignore`.
     #[serde(default)]
     pub ignore_patterns: Vec<String>,
+    /// Apply the built-in default ignore patterns during discovery (§7.3 / Decision Log D32).
+    /// When `true` (the default), common virtualenv/dependency/build directories (e.g. `env/`,
+    /// `.venv/`, `node_modules/`, `__pycache__/`, `target/`, `dist/`, `build/`, `*.pyc`) are always
+    /// excluded — independent of `.gitignore` — and `ignore_patterns` *extends* (never replaces) that
+    /// set. Set to `false` to opt out, so only `.gitignore` and `ignore_patterns` apply.
+    #[serde(default = "default_use_default_ignores")]
+    pub use_default_ignores: bool,
     /// Languages to index.
     #[serde(default = "default_languages")]
     pub languages: Vec<Language>,
@@ -86,6 +93,9 @@ fn default_version() -> String {
 fn default_languages() -> Vec<Language> {
     vec![Language::Python, Language::TypeScript, Language::Go]
 }
+fn default_use_default_ignores() -> bool {
+    true
+}
 fn default_db_path() -> String {
     ".codecache/index.db".to_string()
 }
@@ -146,6 +156,7 @@ impl Default for Config {
             version: default_version(),
             index_paths: Vec::new(),
             ignore_patterns: Vec::new(),
+            use_default_ignores: default_use_default_ignores(),
             languages: default_languages(),
             storage: StorageConfig::default(),
             retrieval: RetrievalConfig::default(),
@@ -260,6 +271,34 @@ mod tests {
             vec![Language::Python, Language::TypeScript, Language::Go]
         );
         assert_eq!(cfg.storage.db_path, ".codecache/index.db");
+        // D32 / §7.3: built-in default ignores are ON by default.
+        assert!(
+            cfg.use_default_ignores,
+            "use_default_ignores must default to true (D32 / §7.3)"
+        );
+    }
+
+    #[test]
+    fn toml_omitting_use_default_ignores_loads_true() {
+        // D32: an existing config that never mentions the new key must keep the documented default
+        // (true) — the new field is `#[serde(default)]` to `true`, so omission ⇒ defaults applied.
+        let cfg: Config = toml::from_str("version = \"0.1.0\"\n")
+            .expect("a TOML omitting use_default_ignores must parse");
+        assert!(
+            cfg.use_default_ignores,
+            "a TOML omitting use_default_ignores must load as true (the §7.3 default)"
+        );
+    }
+
+    #[test]
+    fn toml_use_default_ignores_false_loads_false() {
+        // D32: the explicit opt-out round-trips through the loader as `false`.
+        let cfg: Config = toml::from_str("use_default_ignores = false\n")
+            .expect("a TOML setting use_default_ignores = false must parse");
+        assert!(
+            !cfg.use_default_ignores,
+            "use_default_ignores = false in TOML must load as false (the opt-out)"
+        );
     }
 
     #[test]

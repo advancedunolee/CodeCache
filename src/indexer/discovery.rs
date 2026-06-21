@@ -5,9 +5,11 @@
 //!
 //! [`discover_files`] walks `config.index_paths` resolved against `root` (defaulting to `root`
 //! itself when `index_paths` is empty), honoring `.gitignore` automatically via
-//! [`ignore::WalkBuilder`], applying `config.ignore_patterns` as additional gitignore-style globs,
-//! and restricting results to source files whose [`detect_language`] is in `config.languages`.
-//! No reachable `unwrap()/expect()/panic!` — every fallible step surfaces an [`IndexError`].
+//! [`ignore::WalkBuilder`], folding in the built-in [`DEFAULT_IGNORE_PATTERNS`] when
+//! `config.use_default_ignores` is set (§7.3 / D32) and applying `config.ignore_patterns` as
+//! additional gitignore-style globs (which extend, never replace, the defaults), and restricting
+//! results to source files whose [`detect_language`] is in `config.languages`. No reachable
+//! `unwrap()/expect()/panic!` — every fallible step surfaces an [`IndexError`].
 
 use std::path::{Path, PathBuf};
 
@@ -36,12 +38,14 @@ pub fn detect_language(path: &Path) -> Option<Language> {
 ///
 /// Walks each entry of `config.index_paths` resolved against `root` (or `root` itself when
 /// `index_paths` is empty), honoring `.gitignore` via [`ignore::WalkBuilder`]. A file is returned
-/// only when it survives `config.ignore_patterns` (applied as gitignore-style globs) **and** its
-/// [`detect_language`] is one of `config.languages`. Returned paths are joined under `root`.
+/// only when it survives the ignore matcher — the built-in [`DEFAULT_IGNORE_PATTERNS`] (when
+/// `config.use_default_ignores`) plus `config.ignore_patterns`, both applied as gitignore-style
+/// globs — **and** its [`detect_language`] is one of `config.languages`. Returned paths are joined
+/// under `root`.
 ///
 /// # Errors
 /// Returns [`IndexError::Io`] if a walk entry cannot be read, or [`IndexError::Glob`] if a
-/// `config.ignore_patterns` entry is not a valid gitignore-style glob.
+/// `config.ignore_patterns` (or built-in default) entry is not a valid gitignore-style glob.
 pub fn discover_files(config: &Config, root: &Path) -> Result<Vec<PathBuf>, IndexError> {
     let ignore = build_ignore_patterns(config, root)?;
 
@@ -81,10 +85,39 @@ fn resolve_walk_roots(config: &Config, root: &Path) -> Vec<PathBuf> {
     }
 }
 
-/// Build a [`Gitignore`] matcher from `config.ignore_patterns`, anchored at `root` so relative
-/// globs (`vendor/**`, `*_generated.py`) match the same way `.gitignore` entries would.
+/// Built-in default ignore globs applied during discovery when `config.use_default_ignores`
+/// is true (the default) — independent of `.gitignore` and of `config.ignore_patterns`, which
+/// EXTENDS this set. See project_plan.md §7.3 / Decision Log D32. `.git/` is harmless (already
+/// hidden-skipped by `WalkBuilder`) but listed for explicitness.
+pub(crate) const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
+    "env/",
+    ".venv/",
+    "venv/",
+    "node_modules/",
+    "__pycache__/",
+    "*.pyc",
+    "target/",
+    "dist/",
+    "build/",
+    ".git/",
+];
+
+/// Build a [`Gitignore`] matcher anchored at `root` so relative globs (`vendor/**`,
+/// `*_generated.py`) match the same way `.gitignore` entries would. When
+/// `config.use_default_ignores` is true (the default), [`DEFAULT_IGNORE_PATTERNS`] are folded in
+/// first (§7.3 / D32), then `config.ignore_patterns` extends — never replaces — that set.
 fn build_ignore_patterns(config: &Config, root: &Path) -> Result<Gitignore, IndexError> {
     let mut builder = GitignoreBuilder::new(root);
+    if config.use_default_ignores {
+        for pattern in DEFAULT_IGNORE_PATTERNS {
+            builder
+                .add_line(None, pattern)
+                .map_err(|source| IndexError::Glob {
+                    pattern: pattern.to_string(),
+                    source,
+                })?;
+        }
+    }
     for pattern in &config.ignore_patterns {
         builder
             .add_line(None, pattern)

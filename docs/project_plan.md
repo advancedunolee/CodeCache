@@ -550,7 +550,11 @@ impl Indexer {
     // Incremental update for specific files (M5.3). `Result<IndexStats, IndexError>`.
     pub fn update_files(&mut self, files: &[PathBuf]) -> Result<IndexStats>;
     
-    // Internal: discover all files in index_paths (free fn `discover_files(config, root)` in M5.1)
+    // Internal: discover all files in index_paths (free fn `discover_files(config, root)` in M5.1).
+    // Honors `.gitignore`, then the built-in `DEFAULT_IGNORE_PATTERNS` (when
+    // `config.use_default_ignores`, the default — see §7.3 / Decision Log D32), then
+    // `config.ignore_patterns` (which EXTENDS the defaults). All three feed one anchored
+    // gitignore-style matcher so a repo with no `.gitignore` is not swamped by venv/vendor noise.
     fn discover_files(&self) -> Result<Vec<PathBuf>>;
     
     // Internal: detect changed files via hash comparison
@@ -764,8 +768,10 @@ fn index_all(config: &Config, storage: &mut Storage) -> Result<IndexStats> {
     let start = Instant::now();
     let mut stats = IndexStats::default();
     
-    // 1. Discover all files
-    let files = discover_files(&config.index_paths, &config.ignore_patterns)?;
+    // 1. Discover all files (shipped signature is `discover_files(config, root)`, §3.2.4):
+    //    honors `.gitignore`, the built-in default ignores (when `config.use_default_ignores`,
+    //    §7.3 / D32), then `config.ignore_patterns` (which extends the defaults).
+    let files = discover_files(config, root)?;
     
     // 2. Group by language
     let mut by_language: HashMap<Language, Vec<PathBuf>> = HashMap::new();
@@ -1430,13 +1436,23 @@ version = "0.1.0"
 # Paths to index
 index_paths = ["src", "lib"]
 
-# Ignore patterns (in addition to .gitignore)
+# Ignore patterns (in addition to the built-in defaults below AND .gitignore)
 ignore_patterns = [
     "**/*.test.py",
     "**/test_*.py",
     "**/*.spec.ts",
     "**/*_test.go",
 ]
+
+# Built-in default ignores. When true (the default), CodeCache ALWAYS excludes common
+# dependency/virtualenv/build directories during discovery — independent of `.gitignore`
+# and independent of `ignore_patterns` — so a target repo with NO `.gitignore` is not
+# swamped by vendored/virtualenv noise (e.g. a `env/`/`.venv/` tree). The built-in set is:
+#   env/  .venv/  venv/  node_modules/  __pycache__/  *.pyc  target/  dist/  build/  .git/
+# `ignore_patterns` (above) EXTENDS this set; it never replaces it. Set this to false to
+# opt out entirely (only `.gitignore` + `ignore_patterns` then apply) — an escape hatch for
+# a repo that legitimately wants to index a directory named, e.g., `build/`.
+use_default_ignores = true
 
 # Languages to index
 languages = ["python", "typescript", "go"]
