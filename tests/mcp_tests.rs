@@ -1537,3 +1537,101 @@ fn search_self_heal_is_bounded_to_result_files() {
          (a whole-index re-heal would have updated it — D14 bounds the heal to result files)"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D33 — MCP `codecache_search` `file_filter` is a GLOB match (parity with the CLI), and a malformed
+// glob is a JSON-RPC `-32602` (invalid params), NOT an internal `-32603` and NOT a panic (RED,
+// test-lead, 2026-06-22).
+//
+// Pre-D33 bug: `handle_search` wrapped the raw `file_filter` string as a literal `PathBuf` and the
+// retriever compared it for exact equality against absolute stored paths ⇒ any `file_filter` value
+// dropped every result. D33 makes `file_filter` a glob compiled in the retriever (one code path for
+// CLI + MCP). For MCP the malformed-glob error must map to `-32602` because the bad pattern is an
+// invalid ARGUMENT (a param of `tools/call`), not an internal retrieval failure — so the eng-lead
+// must remap the new `RetrieverError::InvalidFilter` to `-32602` (the current handler funnels all
+// retriever errors to `-32603`, which is why the malformed test is RED on the code, not just compile).
+//
+// These tests use the existing in-memory `serve` harness + `test_server_seeded` seeding (the seeded
+// `file_path`s are relative, e.g. `src/auth.py`, so a basename/extension glob restricts them just
+// like discovery-stored absolute paths would under suffix-anchoring).
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/// `tools/call codecache_search { query, file_filter }` with a GLOB `file_filter` restricts the
+/// results to the matching files — proving the MCP path uses the same glob semantics as the CLI.
+/// The seed has one `.py` and one `.go` symbol both matching the query term; `*.py` keeps only the
+/// `.py` hit. Under the pre-D33 exact-equality bug this returned NOTHING.
+#[test]
+fn call_codecache_search_file_filter_glob_restricts_results() {
+    let (server, _tmp) = test_server_seeded(&[
+        seed_chunk(
+            "src/auth.py",
+            "lookup_account",
+            SymbolType::Function,
+            None,
+            "def lookup_account(user):\n    return account_lookup(user)",
+            10,
+            20,
+        ),
+        seed_chunk(
+            "src/store.go",
+            "LookupRecord",
+            SymbolType::Function,
+            None,
+            "func LookupRecord(id string) Record {\n    return recordLookup(id)\n}",
+            5,
+            15,
+        ),
+    ]);
+
+    // `*.py` (suffix-anchored to `**/*.py`) keeps only the Python hit; the Go hit is filtered out.
+    let resp = tools_call(
+        server,
+        40,
+        "codecache_search",
+        serde_json::json!({ "query": "lookup", "file_filter": "*.py" }),
+    );
+    assert_eq!(
+        resp.get("id").and_then(|v| v.as_i64()),
+        Some(40),
+        "search response must echo the request id; got: {resp}"
+    );
+
+    let text = call_result_text(&resp);
+    assert!(
+        text.contains("lookup_account"),
+        "the .py hit must survive the `*.py` file_filter glob; got: {text:?}"
+    );
+    assert!(
+        !text.contains("LookupRecord"),
+        "the .go hit must be excluded by the `*.py` file_filter glob; got: {text:?}"
+    );
+    assert!(
+        !text.contains("src/store.go"),
+        "no .go locator may appear under a `*.py` file_filter; got: {text:?}"
+    );
+}
+
+/// A MALFORMED `file_filter` glob (unclosed character class `a/[`) must map to JSON-RPC `-32602`
+/// (invalid params) — a bad argument — NOT the `-32603` internal-error code and NOT a panic. Pins
+/// the D33 error-code remap for the MCP surface.
+#[test]
+fn call_codecache_search_malformed_file_filter_is_invalid_params() {
+    let (server, _tmp) = test_server_seeded(&[seed_chunk(
+        "src/auth.py",
+        "lookup_account",
+        SymbolType::Function,
+        None,
+        "def lookup_account(user):\n    return account_lookup(user)",
+        10,
+        20,
+    )]);
+
+    let resp = tools_call(
+        server,
+        41,
+        "codecache_search",
+        serde_json::json!({ "query": "lookup", "file_filter": "a/[" }),
+    );
+    // -32602 (invalid params), echoing id 41 — a malformed glob is a bad ARGUMENT, not -32603.
+    assert_error_code(&resp, -32602, 41);
+}

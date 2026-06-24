@@ -93,6 +93,14 @@ this document is the source for "what scenarios must a slice cover" referenced b
 - **R2.2a (D24) `QueryOptions.bm25_weights: Option<[f64;7]>`** — `None` is default-identical (every
   existing retriever test stays green with the field added); `Some(custom)` threads through to
   `storage.search_with_weights` and changes the returned ranking (name-vs-body reorder seed).
+- **D33 `file_filter` is a GLOB match (not exact-path), suffix-anchored, typed error on malformed** —
+  over an absolute `/repo/{a,b,c}` corpus (.py/.go/.ts): `*.py` keeps all `.py` any dir; `a/**` keeps
+  only that subtree; basename `query.py` keeps that file any dir (not `query.go`); absolute `/repo/a/**`
+  used as-is; multiple patterns OR (`["*.py","*.go"]`); valid-but-unmatchable (`*.rs`) ⇒ empty `Ok`;
+  `None` keeps all (regression); malformed (`a/[`, or one bad pattern in the OR-set) ⇒
+  `Err(RetrieverError::InvalidFilter(_))` with the offending pattern in `Display` — NOT a silent empty
+  `Ok`. The M6.2 `file_filter_restricts_results_to_listed_files` test is MIGRATED (not weakened) to a
+  basename glob that still selects the same file.
 
 ### formatter
 - Golden outputs for TOON, JSON, plaintext; JSON is valid and round-trips; file:line pairs correct.
@@ -105,6 +113,9 @@ this document is the source for "what scenarios must a slice cover" referenced b
   on an indexed fixture (and `query --help` advertises the flag); malformed (wrong arity `"1,2,3"` /
   `"1,2,3,4,5,6,7,8"`, non-numeric `"a,b,c,d,e,f,g"`, empty `""`) ⇒ NONZERO exit + non-empty stderr +
   NO `panicked` on either stream (typed parse error, never a panic); absent ⇒ default behavior.
+- **D33 `query --file-filter <glob>`** — E2E through the built binary: a matching glob (`'*.py'`) over an
+  indexed `.py` fixture KEEPS the hit (was the 0-results bug); a malformed glob (`'a/['`) ⇒ NONZERO exit +
+  non-empty stderr + NO `panicked` on either stream (typed `InvalidFilter` → clean nonzero exit).
 
 ### mcp_server
 - JSON-RPC handshake; tool registration list (all three tools — `codecache_search`,
@@ -120,6 +131,9 @@ this document is the source for "what scenarios must a slice cover" referenced b
   [search,update,outline] stable across two calls. (`max_tokens` defaults pinned as JSON numbers,
   `file_filter` default as JSON null.)
 - `codecache_outline` returns the symbol skeleton from the index (no source reads — D7/D13).
+- **D33 `codecache_search` `file_filter` glob (CLI parity):** a GLOB `file_filter` (`"*.py"`) restricts
+  results identically to the CLI (keeps the `.py` hit, drops the `.go` hit); a malformed `file_filter`
+  (`"a/["`) ⇒ JSON-RPC `-32602` (invalid params — a bad argument), NOT `-32603` and NOT a panic.
 - **M8.4 self-healing search (D14):** over a REAL on-disk index (seed via `init`+`index`, then
   mutate files behind the index): (1) a result file EDITED on disk ⇒ search returns FRESH content,
   stale token gone, `files_reindexed == 1`; (2) UNCHANGED result files ⇒ NO re-index writes, pinned

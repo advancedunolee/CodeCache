@@ -53,6 +53,8 @@ The search-execution half of `query` (no token budget yet — that's M6.3):
 - `QueryResult { chunks, total_tokens, total_results_found }`. `total_tokens` is `0` until M6.3;
   `total_results_found` is the post-filter + post-dedup (pre-budget) count.
 - `RetrieverError::Storage(StorageError)` (impl Error/Display, `From<StorageError>`) + `Result<T>`.
+  **D33 added `RetrieverError::InvalidFilter(String)`** — a malformed `file_filter` glob (carries the
+  offending pattern; `source()` is `None`); CLI → nonzero exit, MCP → `-32602`.
 - `query` pipeline: `preprocess_query` → **short-circuit if no tokens** (empty/all-stopword ⇒ empty
   `QueryResult`, never `MATCH ""`) → `build_match_expression` → `storage.search(&expr, max_results)`
   (expression bound to `symbols MATCH ?1` **parameterized**, not interpolated) → stable sort →
@@ -67,8 +69,16 @@ The search-execution half of `query` (no token budget yet — that's M6.3):
   is preserved** — the M4 chunker guarantees same-file chunks are disjoint OR strictly nested, so a
   class and a method inside it are distinct units and both survive. Different files never collide.
   Dedup runs after the SQL `LIMIT` (safety net; true crossing duplicates are rare given M4's invariant).
-- **`file_filter`:** documented as a **post-filter** over `chunk.file_path` (exact `PathBuf` match),
-  not a SQL predicate — keeps the FTS5 query simple; M7 CLI maps `--file-filter` glob to this list.
+- **`file_filter`:** a **glob post-filter** over `chunk.file_path` (**D33**), not a SQL predicate —
+  keeps the FTS5 query simple. Each `PathBuf` entry is a glob pattern compiled with `globset`
+  (`GlobBuilder::literal_separator(true)` so `*` doesn't cross `/`, `**` does; case-sensitive — same
+  engine the indexer's `ignore` stack uses). **Anchoring:** a pattern NOT starting with `/` is
+  **suffix-anchored** (auto-prepend `**/`), so `*.py` matches any `.py` file and `a/**` matches that
+  subtree anywhere; an **absolute** glob (leading `/`) is used **as-is** (root-anchored). A result is
+  kept if its path matches **any** pattern (OR over the set); built **once per query**. `None` ⇒ no
+  filtering. A **malformed** glob ⇒ `RetrieverError::InvalidFilter(<pattern>)` (typed, Display carries
+  the bad pattern), **never** a silent-empty `Ok` — that silence was the bug D33 fixed. One retriever
+  code path serves both the CLI `--file-filter` and the MCP `codecache_search` `file_filter` arg (D4).
 
 ## Shipped API (M6.3 — token-budget packing)
 The §6.3 greedy packer; `query` now trims to the budget instead of returning everything:
@@ -121,3 +131,11 @@ The §6.3 greedy packer; `query` now trims to the budget instead of returning ev
   = None`); `query` routes it to `Storage::search_with_weights`. `None` keeps every existing retriever
   test's order (default-identical); `Some(custom)` changes ranking. +1 integration test
   (`bm25_weights_some_changes_ranking_vs_none`); all 13 retriever tests green; all four gates clean.
+- **D33 GREEN + APPROVED (2026-06-22):** `--file-filter` / MCP `file_filter` was a no-op bug — it did
+  **exact `PathBuf` equality** against stored absolute paths, so any value dropped all results (12→0 on
+  a real Django index). `apply_file_filter` now compiles each pattern to a `globset` glob
+  (suffix-anchored unless absolute; `literal_separator(true)`; OR over the set; built once per query)
+  and is fallible — a malformed glob ⇒ `RetrieverError::InvalidFilter`. `globset = "0.4.18"` added as a
+  direct dep (the version `ignore` already resolves; lean). +9 retriever tests + 1 migrated M6.2 test
+  + 2 CLI e2e + 2 MCP tests; **251 tests** green, all four gates clean. Reviewer APPROVED. Brief:
+  [`.claude/briefs/BRIEF-bugfix-file-filter-glob.md`](../../.claude/briefs/BRIEF-bugfix-file-filter-glob.md).

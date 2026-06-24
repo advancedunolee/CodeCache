@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use codecache::retriever::{QueryOptions, Retrieve, Retriever};
+use codecache::retriever::{QueryOptions, Retrieve, Retriever, RetrieverError};
 use codecache::storage::Storage;
 use codecache::types::{Chunk, Language, SymbolType};
 
@@ -297,7 +297,15 @@ fn overlapping_snippets_deduplicated() {
 
 #[test]
 fn file_filter_restricts_results_to_listed_files() {
-    // With a file_filter, only chunks whose file_path is in the listed set survive.
+    // With a file_filter, only chunks whose file_path matches survive.
+    //
+    // D33 MIGRATION (2026-06-22): this M6.2 test originally asserted EXACT-absolute-path equality
+    // with `file_filter: Some(vec![PathBuf::from("src/keep.py")])`. Under D33 the filter is now a
+    // GLOB match, not exact-path equality, so the original literal would only have matched by glob
+    // coincidence. To preserve the test's intent (keep `src/keep.py`, drop `src/drop.py`) under the
+    // new semantics WITHOUT weakening it, the filter value is re-expressed as the BASENAME GLOB
+    // `keep.py`: a non-absolute pattern is suffix-anchored (`**/keep.py`), so it selects exactly the
+    // same `src/keep.py` file and still excludes `src/drop.py`. Same assertion, glob-expressed value.
     let (_dir, storage) = fresh_storage();
     let body = "load configuration from disk";
     let chunks = vec![
@@ -310,7 +318,8 @@ fn file_filter_restricts_results_to_listed_files() {
     let options = QueryOptions {
         max_tokens: 1_000_000,
         max_results: 20,
-        file_filter: Some(vec![PathBuf::from("src/keep.py")]),
+        // Basename glob `keep.py` ⇒ suffix-anchored `**/keep.py` ⇒ selects only `src/keep.py`.
+        file_filter: Some(vec![PathBuf::from("keep.py")]),
         bm25_weights: None,
     };
     let result = retriever
@@ -322,7 +331,7 @@ fn file_filter_restricts_results_to_listed_files() {
         assert_eq!(
             r.chunk.file_path,
             PathBuf::from("src/keep.py"),
-            "only listed files survive the filter"
+            "only files matching the glob survive the filter"
         );
     }
 }
@@ -617,5 +626,239 @@ fn bm25_weights_some_changes_ranking_vs_none() {
     assert_ne!(
         default_order, custom_order,
         "QueryOptions.bm25_weights must change the retriever's returned ordering"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D33 — `file_filter` is a GLOB match (not exact-path equality), suffix-anchored, typed error on
+// a malformed glob (RED, test-lead, 2026-06-22).
+//
+// Bug being specified out of existence: `apply_file_filter` kept a result only on EXACT `PathBuf`
+// equality, so any user-typed glob (`*.py`) or relative fragment never equaled an absolute stored
+// `chunk.file_path` ⇒ every result was silently dropped. D33 ratifies the documented behavior:
+//   - Each `file_filter` pattern is compiled to a `globset` glob and matched against the stored
+//     ABSOLUTE `chunk.file_path`. A result is kept if it matches ANY pattern (OR over the set).
+//   - Anchoring: a pattern NOT starting with `/` is suffix-anchored (auto-prepend `**/`), so
+//     `*.py` matches any `.py` file, `a/**` matches that subtree anywhere, and a basename glob
+//     (`query.py`) matches that file in any dir. An ABSOLUTE glob (leading `/`) is used as-is.
+//   - A MALFORMED glob (e.g. `a/[`) is a TYPED error `RetrieverError::InvalidFilter(..)`, NEVER a
+//     silent empty `Ok`. A valid-but-unmatchable glob still legitimately returns zero results (Ok).
+//   - `None` ⇒ no filtering (regression guard).
+//
+// These tests seed ABSOLUTE paths under a synthetic `/repo` root across multiple dirs/extensions,
+// per the brief. They fail to COMPILE until `RetrieverError::InvalidFilter` exists, and once it
+// exists they fail on behavior until the retriever compiles+matches globs instead of comparing
+// paths for equality. Both are legitimate RED.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/// Options carrying a glob `file_filter` (large budget so nothing is trimmed). Each entry is a raw
+/// glob pattern (`Option<Vec<PathBuf>>` is unchanged — the retriever compiles them).
+fn filter_opts(patterns: &[&str]) -> QueryOptions {
+    QueryOptions {
+        max_tokens: 1_000_000,
+        max_results: 20,
+        file_filter: Some(patterns.iter().map(PathBuf::from).collect()),
+        bm25_weights: None,
+    }
+}
+
+/// Seed the four-file corpus from the brief (ABSOLUTE paths under `/repo`, multiple dirs +
+/// extensions). Every chunk shares the search term `lookup` so a query surfaces all of them; the
+/// `file_filter` is then the only thing that varies which survive. Distinct byte spans avoid dedup.
+/// Returns the live `TempDir` (keep alive) + a `Retriever` over the seeded storage.
+fn seed_glob_corpus() -> (tempfile::TempDir, Retriever) {
+    let (dir, storage) = fresh_storage();
+    let body = "def lookup(): perform the lookup";
+    let files = [
+        "/repo/a/query.py",
+        "/repo/a/models.py",
+        "/repo/b/sub/query.go",
+        "/repo/c/util.ts",
+    ];
+    let chunks: Vec<Chunk> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            // Distinct, non-overlapping spans per file so dedup never collapses anything.
+            let start = i * 1000;
+            chunk_at(f, "lookup", body, start, start + body.len(), 1, 5)
+        })
+        .collect();
+    storage.insert_chunks(&chunks).expect("seed glob corpus");
+    let retriever = Retriever::new(storage);
+    (dir, retriever)
+}
+
+/// The set of (string) `file_path`s in a query result, sorted for order-independent comparison.
+fn result_paths(result: &codecache::retriever::QueryResult) -> Vec<String> {
+    let mut paths: Vec<String> = result
+        .chunks
+        .iter()
+        .map(|r| r.chunk.file_path.to_string_lossy().into_owned())
+        .collect();
+    paths.sort();
+    paths
+}
+
+#[test]
+fn file_filter_star_py_keeps_all_python_regardless_of_dir() {
+    // `*.py` is suffix-anchored to `**/*.py` ⇒ matches every `.py` file in any directory, and only
+    // `.py` files (not the `.go` or `.ts`). This is the headline case that returned 0 under the bug.
+    let (_dir, retriever) = seed_glob_corpus();
+    let result = retriever
+        .query("lookup", filter_opts(&["*.py"]))
+        .expect("glob query succeeds");
+    assert_eq!(
+        result_paths(&result),
+        vec![
+            "/repo/a/models.py".to_string(),
+            "/repo/a/query.py".to_string(),
+        ],
+        "`*.py` keeps every .py file (any dir) and excludes .go/.ts"
+    );
+}
+
+#[test]
+fn file_filter_subtree_glob_keeps_only_that_subtree() {
+    // `a/**` is suffix-anchored to `**/a/**` ⇒ keeps only the `/repo/a/` subtree, no matter where it
+    // sits. The `b/` and `c/` files are excluded.
+    let (_dir, retriever) = seed_glob_corpus();
+    let result = retriever
+        .query("lookup", filter_opts(&["a/**"]))
+        .expect("subtree glob query succeeds");
+    assert_eq!(
+        result_paths(&result),
+        vec![
+            "/repo/a/models.py".to_string(),
+            "/repo/a/query.py".to_string(),
+        ],
+        "`a/**` keeps only the a/ subtree (any depth), excludes b/ and c/"
+    );
+}
+
+#[test]
+fn file_filter_basename_glob_keeps_that_file_in_any_dir() {
+    // A basename glob `query.py` is suffix-anchored to `**/query.py` ⇒ matches the `query.py` file
+    // wherever it lives, but NOT `query.go` (different extension) and not `models.py`.
+    let (_dir, retriever) = seed_glob_corpus();
+    let result = retriever
+        .query("lookup", filter_opts(&["query.py"]))
+        .expect("basename glob query succeeds");
+    assert_eq!(
+        result_paths(&result),
+        vec!["/repo/a/query.py".to_string()],
+        "`query.py` keeps exactly the one query.py (any dir), not query.go or models.py"
+    );
+}
+
+#[test]
+fn file_filter_absolute_glob_used_as_is_keeps_only_that_subtree() {
+    // An ABSOLUTE glob (leading `/`) is root-anchored and used verbatim (NOT suffix-anchored):
+    // `/repo/a/**` keeps only the `/repo/a/` subtree.
+    let (_dir, retriever) = seed_glob_corpus();
+    let result = retriever
+        .query("lookup", filter_opts(&["/repo/a/**"]))
+        .expect("absolute glob query succeeds");
+    assert_eq!(
+        result_paths(&result),
+        vec![
+            "/repo/a/models.py".to_string(),
+            "/repo/a/query.py".to_string(),
+        ],
+        "absolute `/repo/a/**` keeps only that subtree (root-anchored, used as-is)"
+    );
+}
+
+#[test]
+fn file_filter_multiple_patterns_or_together() {
+    // Multiple patterns OR together: `["*.py", "*.go"]` keeps py + go, excludes the ts file.
+    let (_dir, retriever) = seed_glob_corpus();
+    let result = retriever
+        .query("lookup", filter_opts(&["*.py", "*.go"]))
+        .expect("multi-pattern glob query succeeds");
+    assert_eq!(
+        result_paths(&result),
+        vec![
+            "/repo/a/models.py".to_string(),
+            "/repo/a/query.py".to_string(),
+            "/repo/b/sub/query.go".to_string(),
+        ],
+        "multiple patterns OR together: *.py OR *.go keeps py+go, excludes ts"
+    );
+}
+
+#[test]
+fn file_filter_valid_but_unmatchable_glob_keeps_none_ok() {
+    // A valid glob that matches nothing in the corpus (`*.rs`) is a legitimate empty result — `Ok`
+    // with zero chunks, NOT an error. (The bug's silent-empty was the WRONG behavior only because it
+    // happened for VALID, should-have-matched patterns; a genuinely unmatchable pattern is fine.)
+    let (_dir, retriever) = seed_glob_corpus();
+    let result = retriever
+        .query("lookup", filter_opts(&["*.rs"]))
+        .expect("an unmatchable-but-valid glob is Ok, not an error");
+    assert!(
+        result.chunks.is_empty(),
+        "a valid-but-unmatchable glob keeps no chunks (legitimate empty Ok)"
+    );
+    assert_eq!(result.total_results_found, 0, "no chunks ⇒ zero found");
+}
+
+#[test]
+fn file_filter_none_keeps_all_regression_guard() {
+    // Regression guard: `None` ⇒ no filtering at all — every matching chunk survives unchanged.
+    let (_dir, retriever) = seed_glob_corpus();
+    let options = QueryOptions {
+        max_tokens: 1_000_000,
+        max_results: 20,
+        file_filter: None,
+        bm25_weights: None,
+    };
+    let result = retriever
+        .query("lookup", options)
+        .expect("unfiltered query succeeds");
+    assert_eq!(
+        result_paths(&result),
+        vec![
+            "/repo/a/models.py".to_string(),
+            "/repo/a/query.py".to_string(),
+            "/repo/b/sub/query.go".to_string(),
+            "/repo/c/util.ts".to_string(),
+        ],
+        "None filter keeps every file (regression guard for the existing behavior)"
+    );
+}
+
+#[test]
+fn file_filter_malformed_glob_returns_typed_invalid_filter_error() {
+    // A MALFORMED glob (unclosed character class `a/[`) must surface as the TYPED error
+    // `RetrieverError::InvalidFilter(..)` — NOT a silent empty `Ok` (the exact failure mode that hid
+    // the original bug), and NOT a generic storage error. Match the variant precisely.
+    let (_dir, retriever) = seed_glob_corpus();
+    let err = retriever
+        .query("lookup", filter_opts(&["a/["]))
+        .expect_err("a malformed glob must be a typed error, not Ok");
+    assert!(
+        matches!(err, RetrieverError::InvalidFilter(_)),
+        "a malformed glob must map to RetrieverError::InvalidFilter, got: {err:?}"
+    );
+    // And the Display surface must mention the offending pattern so the CLI/MCP message is useful.
+    let msg = err.to_string();
+    assert!(
+        msg.contains("a/["),
+        "InvalidFilter Display should name the offending pattern; got: {msg:?}"
+    );
+}
+
+#[test]
+fn file_filter_one_bad_pattern_among_valid_still_errors() {
+    // The error is per-pattern-set: if ANY pattern in the OR-set is malformed, the whole query is a
+    // typed InvalidFilter error (we never silently ignore the bad pattern and filter on the rest).
+    let (_dir, retriever) = seed_glob_corpus();
+    let err = retriever
+        .query("lookup", filter_opts(&["*.py", "b/["]))
+        .expect_err("any malformed pattern in the set makes the query a typed error");
+    assert!(
+        matches!(err, RetrieverError::InvalidFilter(_)),
+        "a malformed pattern anywhere in the set ⇒ InvalidFilter, got: {err:?}"
     );
 }

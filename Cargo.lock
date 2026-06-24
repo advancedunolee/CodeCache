@@ -241,6 +241,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "criterion",
+ "globset",
  "ignore",
  "once_cell",
  "predicates",

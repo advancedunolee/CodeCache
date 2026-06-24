@@ -261,6 +261,56 @@ fn e2e_index_is_incremental_on_rerun() {
 //    against the in-memory `serve(reader, writer, server)` seam.
 // ───────────────────────────────────────────────────────────────────────────
 
+// ───────────────────────────────────────────────────────────────────────────
+// 7. (D33) `--file-filter` is a GLOB match, not exact-path equality. Before D33
+//    ANY `--file-filter` value dropped EVERY result (the CLI wrapped the raw
+//    string as a literal `PathBuf` and the retriever compared it for equality
+//    against absolute stored paths). These two e2e tests pin the fix end-to-end
+//    through the built binary:
+//      (a) a matching glob `*.py` over the indexed `.py` fixture KEEPS the hit
+//          (was the 0-results bug);
+//      (b) a MALFORMED glob `a/[` exits NONZERO with a stderr message and never
+//          panics (typed InvalidFilter → clean CLI error).
+// ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn e2e_query_file_filter_glob_keeps_matching_python_hits() {
+    let tmp = temp_project();
+    let root = tmp.path();
+
+    cc_in(root).arg("init").assert().success();
+    cc_in(root).arg("index").assert().success();
+
+    // `*.py` (suffix-anchored to `**/*.py`) matches the indexed `module.py`, so the symbol must
+    // still surface — this is the exact case that returned 0 results under the pre-D33 bug.
+    cc_in(root)
+        .args(["query", "hash_password", "--file-filter", "*.py"])
+        .assert()
+        .success()
+        .stdout(contains("hash_password"))
+        .stdout(contains("module.py:"));
+}
+
+#[test]
+fn e2e_query_malformed_file_filter_glob_exits_nonzero() {
+    let tmp = temp_project();
+    let root = tmp.path();
+
+    cc_in(root).arg("init").assert().success();
+    cc_in(root).arg("index").assert().success();
+
+    // A malformed glob (unclosed character class) must fail cleanly: nonzero exit, a stderr
+    // message, and NO Rust panic / segfault. (Pre-D33 this path didn't glob at all, so there was
+    // no validation point; D33 routes the typed InvalidFilter to a clean nonzero CLI exit.)
+    cc_in(root)
+        .args(["query", "hash_password", "--file-filter", "a/["])
+        .assert()
+        .failure()
+        .stderr(predicate::str::is_empty().not())
+        .stderr(contains("panicked").not())
+        .stdout(contains("panicked").not());
+}
+
 #[test]
 fn e2e_serve_unsupported_transport_sse_errors_cleanly() {
     let tmp = temp_project();

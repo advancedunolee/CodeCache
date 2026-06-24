@@ -506,7 +506,15 @@ impl Retriever {
 pub struct QueryOptions {
     pub max_tokens: usize,        // Default: 4000
     pub max_results: usize,       // Default: 20
-    pub file_filter: Option<Vec<PathBuf>>,  // Optional: restrict to specific files
+    // Optional: restrict results to files matching these **glob patterns** (Decision Log D33).
+    // Each entry is a glob compiled against the stored (absolute) `chunk.file_path`. Anchoring:
+    // a pattern that does NOT start with `/` is **suffix-anchored** — auto-prepended with `**/`
+    // — so `*.py` matches any `.py` file, `django/db/**` matches that subtree anywhere, and an
+    // absolute glob (`/abs/repo/**`) is used as-is. Type stays `Option<Vec<PathBuf>>` (the raw
+    // patterns) so the CLI/MCP wire surface is unchanged; the retriever compiles them to a glob
+    // matcher at query time (see §6). A malformed pattern is a TYPED error (never a silent empty
+    // result). `None` ⇒ no filtering.
+    pub file_filter: Option<Vec<PathBuf>>,
     // R2.2a / Decision Log D24: optional per-column BM25 weight override for the 7 indexed
     // FTS5 columns, in `schema::CREATE_SYMBOLS` order — symbol_name, symbol_type, chunk_text,
     // parent_symbol, imports, cross_references, file_docstring. `None` ⇒ the built-in default
@@ -990,6 +998,32 @@ fn query(user_query: &str, options: QueryOptions, storage: &Storage) -> Result<Q
 }
 ```
 
+> The shipped `Retriever::query` pipeline interposes additional deterministic steps between the FTS5
+> search and the token-budget pack: a stable tie-break sort, the **`file_filter` glob step**
+> (below), then overlap-dedup (see `src/retriever/CLAUDE.md` for the authoritative order).
+
+#### 6.1.1 `file_filter` glob semantics (Decision Log D33)
+
+When `options.file_filter` is `Some(patterns)`, the retriever compiles each pattern into a glob
+**once per query** and keeps only results whose stored `chunk.file_path` matches **any** pattern
+(an OR over the set). It is a **post-filter** over returned chunks (not a SQL `file_path`
+predicate), so the FTS5 `MATCH` stays simple and the same glob semantics apply uniformly to the
+CLI `--file-filter` and the MCP `codecache_search` `file_filter` argument.
+
+- **Anchoring.** Stored paths are absolute. A pattern **not** starting with `/` is
+  **suffix-anchored** — the retriever auto-prepends `**/` — so the patterns a user naturally types
+  match: `*.py` → matches any `.py` file; `django/db/**` → matches that subtree wherever it lives;
+  a basename glob like `query.py` matches that file in any directory. An **absolute** glob
+  (starts with `/`, e.g. `/abs/repo/django/db/**`) is used **as-is** (root-anchored), so a user
+  who pastes an absolute path subtree also works.
+- **Engine.** `globset` (the matcher crate inside the already-present `ignore` stack used by
+  `indexer/discovery.rs`), so filter glob semantics are consistent with discovery's ignore globs —
+  `*` does not cross `/`, `**` does; case-sensitive. No new glob dependency family is introduced.
+- **Invalid pattern → typed error.** A malformed glob surfaces as
+  `RetrieverError::InvalidFilter` (→ a clean nonzero CLI exit / MCP `-32602`), **never** a silent
+  empty result. Silent-empty was the exact failure mode that hid the original non-functional-filter
+  bug; an unmatchable-but-valid pattern still legitimately returns zero results.
+
 ### 6.2 BM25 Ranking (SQLite FTS5)
 
 SQLite FTS5 provides a built-in `bm25()` function that implements the BM25 ranking algorithm. **No custom implementation needed.**
@@ -1305,7 +1339,10 @@ OPTIONS:
     --max-tokens <N>        Maximum tokens in output [default: 4000]
     --max-results <N>       Maximum number of results [default: 20]
     --format <FORMAT>       Output format: toon|json|text [default: text]
-    --file-filter <GLOB>    Restrict search to files matching glob
+    --file-filter <GLOB>    Restrict search to files matching glob (D33). A pattern without a
+                            leading '/' is suffix-anchored (e.g. '*.py' matches any .py file,
+                            'django/db/**' matches that subtree); an absolute glob is used as-is.
+                            A malformed glob is a clean error, never a silent empty result.
     --bm25-weights <W>      7 comma-separated f64 per-column BM25 weights, in indexed-column
                             order: symbol_name,symbol_type,chunk_text,parent_symbol,imports,
                             cross_references,file_docstring. Omitted ⇒ the built-in defaults
@@ -1326,8 +1363,11 @@ EXAMPLES:
     # TOON format (for editor integration)
     codecache query "parse config" --format toon
     
-    # Filter to specific directory
+    # Filter to specific directory subtree (suffix-anchored — matches the subtree anywhere)
     codecache query "auth" --file-filter "src/auth/**"
+
+    # Filter by extension (matches any .py file)
+    codecache query "auth" --file-filter "*.py"
 
     # Override BM25 per-column weights (R2 ranking sweep; default is 10,1,1,5,2,2,2)
     codecache query "authenticate user" --bm25-weights "5,1,3,2,1,1,1"
@@ -1529,7 +1569,7 @@ staleness window and is left untouched. Implemented at **M8.4**; the per-search 
       },
       "file_filter": {
         "type": "string",
-        "description": "Optional: restrict results to a single exact file path (e.g., 'src/auth/authenticate.py'). NOTE: v0.1 matches the path exactly — glob/wildcard expansion is a v0.2 target.",
+        "description": "Optional: restrict results to files matching a glob (D33). A pattern without a leading '/' is suffix-anchored (e.g. '*.py' matches any .py file, 'src/auth/**' matches that subtree anywhere); an absolute glob is used as-is. A malformed glob is a clean error, not a silent empty result.",
         "default": null
       }
     },

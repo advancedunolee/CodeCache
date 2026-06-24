@@ -992,6 +992,45 @@ per-invocation override is requested. Owner: manager (this decision + plan/doc-s
 `.claude/briefs/BRIEF-discovery-default-ignores.md`. Cross-references **M5.1** discovery (the
 `build_ignore_patterns` seam this extends).
 
+### D33 — `--file-filter` / MCP `file_filter` is a glob match (not exact-path), suffix-anchored, typed-error on malformed  · **Adopted 2026-06-22** (plan: post-M10 hardening; affects M6 `retriever`, M7 `cli`, M8 `mcp_server`) — *spec: §3.2.3, §6.1.1, §7.2 (`codecache query`), §8.2 (Tool 1)*
+
+**Real-world finding (verified against a 2 922-file Django index).** `codecache query "<q>"`
+returned 12 results; the **same query with any** `--file-filter` value returned **0** —
+`--file-filter '*'`, `'*.py'`, `'*query*'`, and `'<absolute-dir>/**'` each dropped **every** result.
+Root cause: `retriever::apply_file_filter` kept a result only on **exact `PathBuf` equality**
+(`allowed.iter().any(|p| p == &r.chunk.file_path)`), and both the CLI (`cli/query.rs`) and the MCP
+handler (`mcp_server/handlers.rs`) wrapped the raw `--file-filter`/`file_filter` string as a literal
+`PathBuf` (`Some(vec![PathBuf::from(s)])`) — **never globbed**. Stored `chunk.file_path` values are
+absolute, so a user-typed glob (`*.py`) or relative fragment (`django/db`) can never *exactly equal*
+an absolute path ⇒ everything is discarded. The CLI `--help` ("Restrict search to files matching
+**glob**") and the retriever module docs both **promised glob behavior that was never built** — a
+documentation/implementation mismatch, and the silent-empty result made it invisible.
+
+**Decision.** Implement the documented glob behavior at the **retriever** layer (so the CLI **and**
+the MCP `file_filter` arg both benefit from one code path, D4):
+- **Glob, not exact path.** `file_filter` patterns are compiled to globs matched against the stored
+  absolute `chunk.file_path`; a result is kept if it matches **any** pattern (OR over the set). Still
+  a **post-filter** (not a SQL predicate), preserving the simple FTS5 `MATCH`.
+- **Anchoring (the natural-typing rule).** A pattern **not** starting with `/` is **suffix-anchored**
+  (auto-prepend `**/`): `*.py` matches any `.py` file, `django/db/**` matches that subtree wherever
+  it lives, a basename glob matches that file in any dir. An **absolute** glob (leading `/`) is used
+  **as-is** (root-anchored). Matches the patterns a user would naturally type against absolute paths.
+- **Reuse the existing glob stack.** Use `globset` (the matcher inside the already-present `ignore`
+  crate used by `indexer/discovery.rs`) so filter semantics are **consistent with discovery's ignore
+  globs** (`*` doesn't cross `/`, `**` does; case-sensitive). **No new glob dependency family** — add
+  `globset` as a direct dep pinned to the version `ignore` already resolves (lean `Cargo.toml`).
+- **Type unchanged.** `QueryOptions.file_filter` stays `Option<Vec<PathBuf>>` (the raw patterns); the
+  glob compile/match lives in the retriever. CLI/MCP wire surface is unchanged.
+- **Invalid glob → typed error.** A malformed pattern surfaces as `RetrieverError::InvalidFilter`
+  → clean nonzero CLI exit / MCP `-32602`. **Never a silent empty result** — that silence is exactly
+  what hid this bug. (A valid-but-unmatchable pattern still legitimately returns zero results.)
+
+**Scope.** No change to BM25/dedup/token-budget; no schema change. The MCP illustrative pseudocode in
+§8.3 (`"file_filter": {... "default": null}`) is non-semantic and stays. Owner: manager (this
+decision + §3.2.3/§6.1.1/§7.2/§8.2 + D33) → test-lead (RED: retriever unit + CLI e2e + MCP path) →
+engineering-lead (GREEN) → reviewer. Brief: `.claude/briefs/BRIEF-bugfix-file-filter-glob.md`.
+Cross-references **M6.2** `apply_file_filter` (the seam this replaces).
+
 ---
 
 ## Deferred to v0.2+ (from project_plan §9.2)

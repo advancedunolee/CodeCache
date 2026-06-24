@@ -23,6 +23,8 @@
 
 use std::path::PathBuf;
 
+use globset::{GlobBuilder, GlobSetBuilder};
+
 use crate::storage::{SearchResult, Storage, StorageError};
 
 /// Stopwords dropped during preprocessing (§6.1). Deliberately **small and code-search-oriented**:
@@ -87,12 +89,19 @@ pub struct QueryResult {
 pub enum RetrieverError {
     /// A failure in the underlying storage / FTS5 layer (lock, SQLite, corrupt row).
     Storage(StorageError),
+    /// A `file_filter` glob pattern that `globset` could not compile (D33). Carries the offending
+    /// pattern string so the CLI/MCP message can name it. The CLI maps this to a clean nonzero
+    /// exit and the MCP handler to `-32602` (invalid params — a malformed argument).
+    InvalidFilter(String),
 }
 
 impl std::fmt::Display for RetrieverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RetrieverError::Storage(e) => write!(f, "retriever storage error: {e}"),
+            RetrieverError::InvalidFilter(pattern) => {
+                write!(f, "invalid file_filter glob pattern: {pattern}")
+            }
         }
     }
 }
@@ -101,6 +110,8 @@ impl std::error::Error for RetrieverError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             RetrieverError::Storage(e) => Some(e),
+            // No inner source: the offending pattern is carried in the variant, not a wrapped error.
+            RetrieverError::InvalidFilter(_) => None,
         }
     }
 }
@@ -183,21 +194,54 @@ impl Retriever {
         kept
     }
 
-    /// Apply the optional `file_filter` post-filter: when `Some`, keep only results whose
-    /// `file_path` is in the listed set. Documented behavior: this is a **post-filter** over the
-    /// returned chunks (not a SQL `file_path` predicate), so the FTS5 query stays simple and the
-    /// filter composes uniformly with the M7 CLI's `--file-filter` glob mapping.
+    /// Apply the optional `file_filter` **glob** post-filter (D33): when `Some`, keep only results
+    /// whose absolute `chunk.file_path` matches ANY of the patterns. Documented behavior: this is a
+    /// **post-filter** over the returned chunks (not a SQL `file_path` predicate), so the FTS5 query
+    /// stays simple and one code path serves both the M7 CLI `--file-filter` and the MCP
+    /// `file_filter` argument (D4).
+    ///
+    /// **Anchoring (per pattern):** a pattern starting with `/` is used verbatim (root-anchored);
+    /// any other pattern is suffix-anchored by prepending `**/` so a basename/extension glob
+    /// (`*.py`, `query.py`, `a/**`) matches at any depth. Each glob is built with
+    /// `literal_separator(true)` so `*` does NOT cross `/` while `**` does. A malformed pattern that
+    /// `globset` cannot compile yields [`RetrieverError::InvalidFilter`] carrying that pattern — the
+    /// whole query fails rather than silently filtering on the survivors.
+    ///
+    /// The `GlobSet` is built **once per query** (not per result), so matching is a single
+    /// pre-compiled pass over the hits.
     fn apply_file_filter(
         results: Vec<SearchResult>,
         filter: &Option<Vec<PathBuf>>,
-    ) -> Vec<SearchResult> {
-        match filter {
-            None => results,
-            Some(allowed) => results
-                .into_iter()
-                .filter(|r| allowed.iter().any(|p| p == &r.chunk.file_path))
-                .collect(),
+    ) -> Result<Vec<SearchResult>> {
+        let Some(patterns) = filter else {
+            return Ok(results); // None ⇒ no filtering.
+        };
+
+        let mut builder = GlobSetBuilder::new();
+        for pattern in patterns {
+            let raw = pattern.to_string_lossy();
+            // D33 anchoring: absolute (leading `/`) ⇒ verbatim; otherwise suffix-anchor with `**/`.
+            let anchored = if raw.starts_with('/') {
+                raw.into_owned()
+            } else {
+                format!("**/{raw}")
+            };
+            let glob = GlobBuilder::new(&anchored)
+                .literal_separator(true)
+                .build()
+                .map_err(|_| {
+                    RetrieverError::InvalidFilter(pattern.to_string_lossy().into_owned())
+                })?;
+            builder.add(glob);
         }
+        let set = builder
+            .build()
+            .map_err(|e| RetrieverError::InvalidFilter(e.to_string()))?;
+
+        Ok(results
+            .into_iter()
+            .filter(|r| set.is_match(&r.chunk.file_path))
+            .collect())
     }
 
     /// Greedily pack the already-ranked, deduped results within `max_tokens` (§6.3). Input must be
@@ -265,7 +309,7 @@ impl Retrieve for Retriever {
         )?;
 
         Self::stable_sort(&mut hits);
-        let filtered = Self::apply_file_filter(hits, &options.file_filter);
+        let filtered = Self::apply_file_filter(hits, &options.file_filter)?;
         let deduped = Self::dedup_overlapping(filtered);
 
         // `total_results_found` is the PRE-budget count (post-filter + post-dedup) — how many

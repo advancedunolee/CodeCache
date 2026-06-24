@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::formatter::{self, Format};
 use crate::hasher;
 use crate::indexer::Indexer;
-use crate::retriever::{QueryOptions, QueryResult, Retrieve, Retriever};
+use crate::retriever::{QueryOptions, QueryResult, Retrieve, Retriever, RetrieverError};
 use crate::storage::Storage;
 use crate::types::SymbolOutline;
 
@@ -113,15 +113,20 @@ pub(super) fn handle_search(
     Ok(formatter::format(&fresh, query, Format::Text))
 }
 
-/// Run one retrieval query, mapping a retrieval failure to `-32603` (internal error).
+/// Run one retrieval query, mapping a retrieval failure to a JSON-RPC error. A malformed
+/// `file_filter` glob ([`RetrieverError::InvalidFilter`]) is a bad ARGUMENT, so it maps to
+/// `-32602` (invalid params); every other retrieval/storage failure stays `-32603` (internal
+/// error). Both the self-healing probe query and the final query route through here, so a bad
+/// `file_filter` surfaces as `-32602` from either.
 fn run_query(
     retriever: &Retriever,
     query: &str,
     options: QueryOptions,
 ) -> Result<QueryResult, (i64, String)> {
-    retriever
-        .query(query, options)
-        .map_err(|e| (INTERNAL_ERROR, format!("search failed: {e}")))
+    retriever.query(query, options).map_err(|e| match e {
+        RetrieverError::InvalidFilter(_) => (INVALID_PARAMS, format!("invalid file_filter: {e}")),
+        other => (INTERNAL_ERROR, format!("search failed: {other}")),
+    })
 }
 
 /// The distinct result `file_path`s of a query, in first-seen order (deterministic — the query

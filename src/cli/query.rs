@@ -2,9 +2,12 @@
 //!
 //! Opens `Storage`, builds a [`Retriever`], runs the query under the flag-derived
 //! [`QueryOptions`], and prints the result through the M7.1 [`crate::formatter`] (format chosen by
-//! `--format`, default text). `--file-filter` maps the given glob/path to a single-entry
-//! `file_filter` list — the retriever applies it as an exact-`PathBuf` post-filter (no glob
-//! expansion in v0.1; documented as exact-match semantics). `--bm25-weights` (R2.2a / **D24**)
+//! `--format`, default text). `--file-filter` maps the given glob to a single-entry `file_filter`
+//! list — the retriever compiles it with `globset` and keeps only results whose absolute
+//! `chunk.file_path` matches (D33): a non-absolute pattern is suffix-anchored (`*.py` ⇒ `**/*.py`),
+//! an absolute pattern (leading `/`) is used as-is, `*` does not cross `/` while `**` does. A
+//! malformed glob surfaces as `RetrieverError::InvalidFilter`, which propagates through the
+//! `.map_err(anyhow::Error::new)?` below to a clean nonzero exit. `--bm25-weights` (R2.2a / **D24**)
 //! parses 7 comma-separated `f64` into the per-column BM25 weight override (absent ⇒ default weights).
 
 use std::path::{Path, PathBuf};
@@ -81,8 +84,9 @@ pub fn run(
     let options = QueryOptions {
         max_tokens,
         max_results,
-        // Exact-match post-filter: wrap the given glob/path as a single allowed path (no glob
-        // expansion in v0.1). The retriever filters on `chunk.file_path == this path`.
+        // Glob post-filter (D33): wrap the raw pattern as a single-entry list; the retriever
+        // compiles it with `globset` (suffix-anchored unless absolute) and keeps only results
+        // whose `chunk.file_path` matches. A malformed glob ⇒ `RetrieverError::InvalidFilter`.
         file_filter: file_filter.map(|f| vec![PathBuf::from(f)]),
         // R2.2a / D24: parsed per-column BM25 weights (None ⇒ default-weighted retrieval).
         bm25_weights,

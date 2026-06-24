@@ -17,7 +17,8 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
 }
 
 /// Tool 1 — `codecache_search` (§8.2): `query` (string), `max_tokens` (integer, default `4000`),
-/// `file_filter` (string, default `null`); required `["query"]`.
+/// `file_filter` (string, default `null`); required `["query"]`. `file_filter` is a **glob** (D33)
+/// matched against stored paths — non-absolute patterns are suffix-anchored, absolute used as-is.
 fn search_tool() -> Value {
     json!({
         "name": "codecache_search",
@@ -36,7 +37,7 @@ fn search_tool() -> Value {
                 },
                 "file_filter": {
                     "type": "string",
-                    "description": "Optional: restrict results to a single exact file path (e.g., 'src/auth/authenticate.py'). Glob/wildcard patterns are NOT expanded in v0.1 — pass a path as indexed (codecache_search returns absolute paths).",
+                    "description": "Optional: restrict results to files matching a glob (D33). A pattern without a leading '/' is suffix-anchored (e.g. '*.py' matches any .py file, 'src/auth/**' matches that subtree anywhere); an absolute glob is used as-is. A malformed glob is a clean error, not a silent empty result.",
                     "default": null
                 }
             },

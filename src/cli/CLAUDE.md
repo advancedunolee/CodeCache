@@ -48,8 +48,11 @@ Handlers are thin adapters returning `anyhow::Result<()>` (Err → nonzero exit;
 - `init` → `codecache::init(&cwd)`; `index` → `codecache::index(&cwd)` (prints `IndexStats`).
 - `update <FILE>...` → `Indexer::update_files(&paths)` (paths resolved under cwd).
 - `query <QUERY>` → `Retriever::query` → `formatter::format(&qr, &query, fmt)` (fmt from the
-  `OutputFormat` `From` seam). `--file-filter` ships as a single-entry exact-`PathBuf` post-filter
-  (no glob expansion in v0.1). **Empty-result + text format prints `No results found.`** instead of
+  `OutputFormat` `From` seam). **`--file-filter` is a GLOB post-filter (D33)** — the raw pattern is
+  threaded as a single-entry `QueryOptions.file_filter` and the retriever globs it against stored
+  paths (non-absolute ⇒ suffix-anchored `**/…`; absolute ⇒ as-is). A malformed glob surfaces as
+  `RetrieverError::InvalidFilter` → a clean nonzero exit (no panic). **Empty-result + text format
+  prints `No results found.`** instead of
   the formatter's query-echoing empty header — an intentional CLI UX choice (the pure `formatter`
   empty-text golden is unchanged; the CLI just declines to render it). JSON always pipes through the
   formatter (parseable); empty TOON stays the query-free empty string. **R2.2a/D24:** `--bm25-weights
@@ -90,3 +93,9 @@ facade live in `app.rs` (serde off `types::Chunk`, D4/D5; reuses `insert_chunks`
 `set_index_state` — no new `Storage` method). +3 cli_tests (hidden-but-reachable `ingest --help` /
 hidden-from-top-level-help / required `<CHUNKS_JSON>` positional). E2E in `tests/e2e_ingest.rs` (10) + lib
 surface in `tests/e2e_ingest_lib.rs` (3). cli_tests 17/17; **224 tests total**; all four gates clean.
+D33 GREEN (2026-06-22): `--file-filter` glob bugfix — the flag was an exact-`PathBuf` no-op that dropped
+all results for any value; now the retriever globs the pattern (D33; see `src/retriever/CLAUDE.md`). CLI
+wiring unchanged (the raw pattern already flowed through); the new `RetrieverError::InvalidFilter` (malformed
+glob) propagates via the existing `.map_err(anyhow::Error::new)?` to a clean nonzero exit. +2 e2e_cli tests
+(`--file-filter '*.py'` keeps `.py` hits / malformed glob exits nonzero, no panic). **251 tests total**;
+all four gates clean. Reviewer APPROVED.

@@ -594,8 +594,11 @@ on a live Python/TS/Go repo. 32 findings confirmed (0 critical), 5 refuted by th
       Now returns `IndexError::UnsupportedLanguage(path)` (D2-isolated → counted-skipped, no write).
       RED→GREEN test `pipeline::tests::extract_file_unsupported_extension_errors_instead_of_python_fallback`.
 - [x] **Schema/doc fix — `codecache_search.file_filter` overclaimed glob.** The MCP tool schema
-      (`tools.rs`) + plan §8.2 advertised a glob pattern; v0.1 matches the path **exactly**. Corrected
-      both to state exact-match (glob = v0.2). No test pinned the description string.
+      (`tools.rs`) + plan §8.2 advertised a glob pattern; v0.1 matched the path **exactly**. At the time
+      this was corrected to state exact-match (glob = v0.2). **SUPERSEDED 2026-06-22 by D33** — rather
+      than keep the docs matching the broken exact-match impl, the documented glob behavior was actually
+      *built* (the exact-match path was a non-functional no-op — it dropped all results). See the D33
+      entry below; the schema/plan/§8.2 wording is now the glob description.
 - [x] **Doc fix — `codecache_outline` input field** documented as `file_path` in CLAUDE_CODE_SETUP;
       handler requires `path` (following the doc verbatim → `-32602`). Corrected + added "match the
       indexed (absolute) path" note.
@@ -629,3 +632,22 @@ on a live Python/TS/Go repo. 32 findings confirmed (0 critical), 5 refuted by th
       discovery note + ROADMAP D32. code-reviewer **APPROVED** (0 blockers; verified the dir-glob
       `env/` exclusion via the regression+opt-out test pair; bundled a §5.1 pseudocode fix for the
       stale 2-arg `discover_files` snippet). → test-lead → engineering-lead → code-reviewer → manager.
+
+### Post-M10 hardening — `--file-filter` glob bugfix (D33, 2026-06-22) · brief: [`.claude/briefs/BRIEF-bugfix-file-filter-glob.md`](../.claude/briefs/BRIEF-bugfix-file-filter-glob.md)
+- [x] **`--file-filter` / MCP `file_filter` glob match (D33).** The flag was **completely
+      non-functional** — `retriever::apply_file_filter` did **exact `PathBuf` equality** against stored
+      absolute paths, and the CLI/MCP both wrapped the raw pattern as a literal `PathBuf`, so any value
+      dropped **all** results (verified 12 → 0 on a real 2 922-file Django index for `*`, `*.py`,
+      `*query*`, `<absdir>/**`). The `--help` + module docs promised glob behavior that was never built.
+      Plan-first: `project_plan.md` §3.2.3 + new §6.1.1 + §7.2 + §8.2 + ROADMAP **D33**. Fix lives at the
+      **retriever** layer (one code path for CLI + MCP, D4): `apply_file_filter` compiles each pattern to
+      a `globset` glob (suffix-anchored unless absolute; `literal_separator(true)`; OR over the set; built
+      once per query) and is fallible — a malformed glob ⇒ new `RetrieverError::InvalidFilter` (CLI →
+      nonzero exit; MCP → **`-32602`**, not `-32603`/panic). `globset = "0.4.18"` added as a direct dep
+      (the version `ignore` already resolves — lean, no new family). `QueryOptions.file_filter` stays
+      `Option<Vec<PathBuf>>`. Agent-facing `tools.rs` schema description corrected to the glob wording.
+      RED→GREEN: +9 retriever tests + 1 **migrated** M6.2 test (re-expressed as a basename glob, not
+      weakened) + 2 e2e_cli + 2 mcp tests. **251 tests** green; all four gates clean (Rust 1.85).
+      code-reviewer **APPROVED** (after a doc-sync BLOCK → fix: the live MCP schema + cli/retriever/mcp
+      CLAUDE.md + this TODO were brought in line with the shipped behavior). → manager (plan + D33 + docs)
+      → test-lead (RED) → engineering-lead (GREEN) → code-reviewer → manager.

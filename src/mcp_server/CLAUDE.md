@@ -60,13 +60,18 @@ of each property's own type (numbers / null). `tools/list` accepts absent `param
 `tools/call` → parses `params.name` + `params.arguments`, routes to the three handlers in
 `src/mcp_server/handlers.rs`, and returns `result { content: [ { type:"text", text } ] }`:
 - `codecache_search` → `Retriever::query` (`query` req, `max_tokens`=4000, `file_filter` opt) →
-  M7 `formatter::format(.., Format::Text)` (agent-first, D13).
+  M7 `formatter::format(.., Format::Text)` (agent-first, D13). **`file_filter` is a GLOB (D33)** —
+  the string arg threads to `QueryOptions.file_filter` and the retriever globs it (suffix-anchored
+  unless absolute); a **malformed glob** ⇒ `RetrieverError::InvalidFilter` mapped to **`-32602`**
+  (invalid params), NOT `-32603`. The `tools.rs` schema description was corrected to the glob wording.
 - `codecache_update` → force re-index of the named `files` (delete each `files_metadata` row via
   `Storage::delete_file_meta`, then `Indexer::update_files`) → stats text. This is the MCP
   "re-index these now" semantic; it does not change `update_files`' own idempotency.
 - `codecache_outline` → `Storage::symbols_for_path` (D19) → `SymbolOutline` skeleton lines (D13).
 Error mapping: unknown tool name / missing or mistyped required arg → `-32602`; handler-internal
-failure (retrieval/index/storage error) → `-32603`. `CodeCacheServer` now holds `Retriever` +
+failure (retrieval/index/storage error) → `-32603`. **D33:** a malformed `file_filter` glob is an
+**argument** error, so `RetrieverError::InvalidFilter` maps to **`-32602`** (not `-32603`), on both
+the heal-probe and final query. `CodeCacheServer` now holds `Retriever` +
 `Indexer` over its shared `Storage` (D8); the `serve` loop dispatches `&mut self` so `update` can
 mutate the index. No reachable `unwrap/expect/panic`.
 
@@ -96,3 +101,8 @@ gates clean (Rust 1.85). v0.1 MCP surface (stdio, 3 tools, self-healing) frozen;
 `handle_line` returns `Option<Value>`; `serve` writes nothing on `None`. +2 RED→GREEN tests in
 `tests/mcp_tests.rs` (`notification_initialized_gets_no_response`,
 `notifications_are_silently_dropped_amid_real_requests`); 21 MCP / 232 total Rust tests green.
+**D33 fix (2026-06-22):** `codecache_search` `file_filter` is now a **glob** (parity with the CLI
+`--file-filter`, one retriever code path) instead of an exact-path no-op; the `tools.rs` schema
+description was corrected from "exact path / NOT expanded in v0.1" to the §8.2 glob wording. A
+malformed glob → `-32602` (invalid params), never `-32603`/panic. +2 MCP tests (glob restricts
+results / malformed → `-32602`); 23 MCP / **251 total** Rust tests green; reviewer APPROVED.
